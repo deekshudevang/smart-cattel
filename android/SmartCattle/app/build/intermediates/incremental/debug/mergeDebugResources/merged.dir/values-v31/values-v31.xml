@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.SmartCattle" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#080E1A</item>
+        <item name="android:statusBarColor">#080E1A</item>
+        
+        <item name="android:windowSplashScreenBackground">#080E1A</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+    </style>
+</resources>
