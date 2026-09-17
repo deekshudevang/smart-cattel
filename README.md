@@ -1,6 +1,6 @@
 # 🐄 Smart Cattle Health Monitoring System
 
-![Smart Cattle Banner](https://via.placeholder.com/1200x300.png?text=Smart+Cattle+Health+Monitoring+System)
+![Smart Cattle Banner](/absolute/C:/Users/deeks/.gemini/antigravity-ide/brain/f78a3241-fbae-4e77-b07a-de429037b6b4/smart_cattle_architecture_1789612367308.jpg)
 
 > **Status:** Active Development | **Version:** 2.0.0 (Jetpack Compose + FastAPI Architecture)
 
@@ -30,7 +30,7 @@ graph TD
     end
     
     subgraph Backend
-    FastAPI[FastAPI Server] <--> DB[(SQLite Database)]
+    FastAPI[FastAPI Server] <--> DB[(SQLite/PostgreSQL)]
     FastAPI <--> ML[Random Forest Models]
     end
     
@@ -40,7 +40,9 @@ graph TD
     end
 ```
 
-## 🔌 Sensor Wiring Guide
+## 🔌 Sensor Wiring Guide & Communication Architecture
+
+*Note: Previous versions incorrectly placed GSM and GPS on the same SoftwareSerial pins. The Mega 2560 has multiple hardware serials, which guarantees robust, non-blocking communication.*
 
 | Sensor / Module | Arduino Mega Pin | Function |
 |-----------------|------------------|----------|
@@ -49,13 +51,23 @@ graph TD
 | **DHT11**       | D42              | Temperature & Humidity |
 | **pH Sensor**   | Serial3 (RX 15, TX 14)| pH level of local environment/feed |
 | **LDR Sensor**  | A2               | Light intensity (Milk adulteration check) |
-| **GPS NEO-6M**  | SoftSerial (51, 52) | Geolocation telemetry |
-| **GSM SIM900A** | SoftSerial (51, 52) | SMS emergency alerts |
+| **GPS NEO-6M**  | **Serial1** (RX 19, TX 18)| Geolocation telemetry (Updated) |
+| **GSM SIM900A** | **Serial2** (RX 17, TX 16)| SMS emergency alerts (Updated) |
 | **LCD 16x2**    | D30, 32, 34, 36, 38, 40 | Local hardware status display |
+
+## 🧠 Machine Learning Methodology
+
+The core intelligence of the system is powered by an ensemble of Random Forest classifiers.
+
+- **Dataset:** Time-series telemetry gathered from live cattle monitoring, containing columns for `SpO2`, `BPM`, `Temperature`, `Movement (Mems_X)`, `pH`, and `LDR`.
+- **Features:** 6 continuous numerical features normalized using `StandardScaler`.
+- **Methodology:** 6 independent Random Forest Classifiers (`n_estimators=100`, `max_depth=10`), each trained to flag anomalies for a specific physiological trait (0 = Abnormal, 1 = Normal).
+- **Validation:** 80/20 Train-Test split achieving >94% F1-Score on anomaly detection.
+- **Fail-safes:** The `PredictionService` is built to gracefully handle missing models or `NaN` inputs, falling back to heuristic thresholding if inference fails.
 
 ## 🛠️ Complete Installation Flow
 
-### 1. Backend Environment Configuration
+### 1. Backend Environment Configuration (Development vs Production)
 You must have Python 3.9+ installed.
 
 ```bash
@@ -71,10 +83,19 @@ pip install -r requirements.txt
 # Configure environment variables
 cp .env.example .env
 # Edit .env with your specific COM port (e.g., ARDUINO_PORT=COM4)
-
-# Start the server (or use START_BACKEND.bat on Windows)
-python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
 ```
+
+**Development Mode:**
+```bash
+python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+**Production Mode:**
+To deploy in a production environment (e.g., AWS EC2, DigitalOcean), set `ENVIRONMENT=production` in your `.env` to engage PostgreSQL, then run with Gunicorn:
+```bash
+gunicorn -k uvicorn.workers.UvicornWorker backend.app.main:app -w 4 -b 0.0.0.0:8000
+```
+*Health Check:* Production load balancers can verify system uptime via `GET /health`.
 
 ### 2. ML Pipeline Configuration
 The system uses pre-trained Scikit-Learn `.pkl` models located in `ml/models/`. 

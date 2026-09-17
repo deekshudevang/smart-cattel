@@ -8,8 +8,9 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
 
-//---------------- GPS + GSM ----------------
-SoftwareSerial uart(51, 52);  // RX,TX
+//---------------- GPS + GSM (Using Mega Hardware Serials) ----------------
+#define GPS_SERIAL Serial1 // Pins 19 (RX1), 18 (TX1)
+#define GSM_SERIAL Serial2 // Pins 17 (RX2), 16 (TX2)
 TinyGPSPlus gps;
 
 String LAT = "0.000000";
@@ -63,7 +64,8 @@ int displaySpO2 = 0;
 void setup() {
   Serial.begin(9600);
   PH_SERIAL.begin(9600);  // UART pH Sensor
-  uart.begin(9600);
+  GPS_SERIAL.begin(9600);
+  GSM_SERIAL.begin(9600);
   Serial.println("Sensor initialized");
   if (sensor.begin() && sensor.setSamplingRate(kSamplingRate)) {
     lcd.begin(16, 2);
@@ -364,26 +366,26 @@ static void smartDelay(unsigned long ms) {
   unsigned long start = millis();
 
   do {
-    while (uart.available())
-      gps.encode(uart.read());
+    while (GPS_SERIAL.available())
+      gps.encode(GPS_SERIAL.read());
 
   } while (millis() - start < ms);
 }
 void sendSMS(String msg) {
-  uart.println("AT");
+  GSM_SERIAL.println("AT");
   delay(1000);
 
-  uart.println("AT+CMGF=1");
+  GSM_SERIAL.println("AT+CMGF=1");
   delay(500);
 
-  uart.println("AT+CMGS=\"+916361038158\"");
+  GSM_SERIAL.println("AT+CMGS=\"+916361038158\"");
   delay(500);
 
-  uart.println(msg);
+  GSM_SERIAL.println(msg);
 
-  uart.println("https://maps.google.com/?q=" + LAT + "," + LON);
+  GSM_SERIAL.println("https://maps.google.com/?q=" + LAT + "," + LON);
 
-  uart.write(26);
+  GSM_SERIAL.write(26);
 
   delay(5000);
 }

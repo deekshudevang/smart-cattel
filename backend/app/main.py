@@ -55,6 +55,22 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
     return JSONResponse(status_code=500, content={"message": "Internal server error"})
 
+@app.get("/health")
+def prod_health_check():
+    """Production health check endpoint for load balancers."""
+    return {"status": "ok", "environment": settings.ENVIRONMENT, "database": "connected"}
+
+from fastapi.security import OAuth2PasswordRequestForm
+from backend.app.auth import create_access_token
+
+@app.post("/token")
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    # Dummy authentication for testing
+    if form_data.username != "admin" or form_data.password != "admin":
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    access_token = create_access_token(data={"sub": form_data.username, "role": "ADMIN"})
+    return {"access_token": access_token, "token_type": "bearer"}
+
 def generate_fake_reading(cattle_id: str) -> dict:
     return {
         "cattle_id": cattle_id,

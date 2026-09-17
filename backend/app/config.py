@@ -2,15 +2,21 @@ from pydantic_settings import BaseSettings
 from typing import List
 
 class Settings(BaseSettings):
+    ENVIRONMENT: str = "development"
     SERIAL_PORT: str = "COM4"
     SERIAL_BAUDRATE: int = 9600
     DATABASE_URL: str = "sqlite:///./smart_cattle.db"
+    PROD_DATABASE_URL: str = "postgresql://user:password@localhost/dbname"
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
     SECRET_KEY: str = "fallback_secret_key"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     ALLOWED_ORIGINS: str = "*"
+    
+    @property
+    def active_database_url(self) -> str:
+        return self.PROD_DATABASE_URL if self.ENVIRONMENT == "production" else self.DATABASE_URL
 
     @property
     def cors_origins(self) -> List[str]:
