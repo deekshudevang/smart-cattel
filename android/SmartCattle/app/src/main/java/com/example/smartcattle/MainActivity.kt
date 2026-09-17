@@ -343,7 +343,7 @@ fun MainScreen(viewModel: CattleViewModel, onOpenSettings: () -> Unit) {
 
     Scaffold(
         topBar = {
-            CenterAlignedTopAppBar(
+            TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(32.dp).clip(CircleShape).background(Green.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) { Text("🐄", fontSize = 16.sp) }
@@ -361,7 +361,7 @@ fun MainScreen(viewModel: CattleViewModel, onOpenSettings: () -> Unit) {
                     }
                     IconButton(onClick = onOpenSettings) { Text("⚙️") }
                 },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = BgDark)
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = BgDark)
             )
         },
         bottomBar = {
