@@ -31,11 +31,14 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import okhttp3.*
+import org.json.JSONObject
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
@@ -81,7 +84,6 @@ interface ApiService {
     suspend fun getLatestReading(@Path("id") id: String): ApiLatest
 }
 
-// ── ViewModel ──
 class CattleViewModel : ViewModel() {
     private val _cattle = MutableStateFlow<List<Cattle>>(emptyList())
     val cattle: StateFlow<List<Cattle>> = _cattle.asStateFlow()
@@ -96,73 +98,112 @@ class CattleViewModel : ViewModel() {
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
     private var api: ApiService? = null
-    private var isPolling = false
+    private var webSocket: WebSocket? = null
+    private val client = OkHttpClient()
 
     fun configureIp(ip: String) {
         val baseUrl = "http://$ip:8000/"
+        val wsUrl = "ws://$ip:8000/ws/cattle/CATTLE-ALL"
+        
         try {
             api = Retrofit.Builder()
                 .baseUrl(baseUrl)
                 .addConverterFactory(GsonConverterFactory.create())
                 .build()
                 .create(ApiService::class.java)
-            if (!isPolling) startPolling()
+                
+            connectWebSocket(wsUrl)
+            
+            // Initial fetch
+            viewModelScope.launch {
+                try {
+                    val apiCattleList = api?.getCattle() ?: emptyList()
+                    // Map to basic UI state to show something immediately (Loading state handled here)
+                    val uiCattleList = apiCattleList.map { Cattle(it.cattle_id, it.name, "Gir", "4 yrs", it.status, emptyList()) }
+                    _cattle.value = uiCattleList
+                } catch(e: Exception) {
+                    // Empty state on error
+                }
+            }
+            
         } catch (e: Exception) {
             _isConnected.value = false
         }
     }
 
-    private fun startPolling() {
-        isPolling = true
-        viewModelScope.launch {
-            while (true) {
-                try {
-                    val apiService = api ?: return@launch
-                    val apiCattleList = apiService.getCattle()
-                    
-                    val uiCattleList = mutableListOf<Cattle>()
-                    val newAlerts = mutableListOf<Alert>()
-                    val newHistory = mutableListOf<List<String>>()
+    private fun connectWebSocket(url: String) {
+        val request = Request.Builder().url(url).build()
+        webSocket = client.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                _isConnected.value = true
+            }
 
-                    for (ac in apiCattleList) {
-                        try {
-                            val reading = apiService.getLatestReading(ac.cattle_id)
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                viewModelScope.launch(Dispatchers.Main) {
+                    try {
+                        val json = JSONObject(text)
+                        if (json.getString("type") == "sensor_update") {
+                            val cid = json.getString("cattle_id")
+                            val data = json.getJSONObject("data")
+                            val health = json.getJSONObject("health")
                             
                             val sensors = listOf(
-                                Sensor("💓", "SpO2", reading.spo2.toInt().toString(), "%", if (reading.spo2 > 95) "Normal" else "Low", if (reading.spo2 > 95) Green else Orange),
-                                Sensor("❤\u200D🩹", "Heart Rate", reading.bpm.toInt().toString(), "bpm", if (reading.bpm in 60.0..90.0) "Normal" else "High", if (reading.bpm in 60.0..90.0) Green else Red),
-                                Sensor("🌡️", "Body Temp", String.format("%.1f", reading.temperature_c), "°C", if (reading.temperature_c < 39.0) "Normal" else "Fever", if (reading.temperature_c < 39.0) Green else Red),
-                                Sensor("🧪", "pH Level", String.format("%.1f", reading.ph_level), "", "Balanced", Green),
-                                Sensor("📡", "Motion", reading.motion_level, "", "Active", Blue),
-                                Sensor("☀️", "Light", reading.light_level.toInt().toString(), "lux", "Bright", Cyan)
+                                Sensor("💓", "SpO2", data.getInt("spo2").toString(), "%", health.optJSONObject("spo2")?.optString("status") ?: "Normal", Green),
+                                Sensor("❤\u200D🩹", "Heart Rate", data.getInt("bpm").toString(), "bpm", health.optJSONObject("bpm")?.optString("status") ?: "Normal", Green),
+                                Sensor("🌡️", "Body Temp", String.format("%.1f", data.getDouble("temperature")), "°C", health.optJSONObject("temperature")?.optString("status") ?: "Normal", Green),
+                                Sensor("🧪", "pH Level", String.format("%.1f", data.getDouble("ph")), "", health.optJSONObject("ph")?.optString("status") ?: "Normal", Green),
+                                Sensor("☀️", "Light", data.getInt("ldr").toString(), "lux", health.optJSONObject("ldr")?.optString("status") ?: "Normal", Cyan)
                             )
                             
-                            uiCattleList.add(Cattle(ac.cattle_id, ac.name, "Gir", "4 yrs", if (reading.health_status == "Healthy") "Healthy" else "At Risk", sensors))
+                            // Check overall health
+                            var overall = "Healthy"
+                            if (health.keys().asSequence().any { health.optJSONObject(it)?.optString("status") == "abnormal" }) {
+                                overall = "At Risk"
+                            }
                             
-                            // Mock history for demo using current time
-                            val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+                            // Update cattle state
+                            val currentCattle = _cattle.value.toMutableList()
+                            val idx = currentCattle.indexOfFirst { it.id == cid }
+                            if (idx != -1) {
+                                val c = currentCattle[idx]
+                                currentCattle[idx] = c.copy(overall = overall, sensors = sensors)
+                                _cattle.value = currentCattle
+                            }
+                            
+                            // Update history
+                            val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
                             val t = timeFormat.format(Date())
-                            newHistory.add(listOf(t, reading.spo2.toInt().toString(), reading.bpm.toInt().toString(), String.format("%.1f", reading.temperature_c), String.format("%.1f", reading.ph_level), if (reading.health_status == "Healthy") "✓" else "⚠"))
-
-                            // Generate alerts based on logic
-                            if (reading.bpm > 90) newAlerts.add(Alert("${ac.name} (${ac.cattle_id})", "Heart rate critically elevated: ${reading.bpm.toInt()} bpm", "Just now", "CRITICAL", Red))
-                            if (reading.temperature_c >= 39.0) newAlerts.add(Alert("${ac.name} (${ac.cattle_id})", "Body temperature ${String.format("%.1f", reading.temperature_c)}°C exceeds safe threshold", "Just now", "WARNING", Orange))
-
-                        } catch (e: Exception) {
-                            // Reading failed for this cattle
+                            val newRow = listOf(t, data.getInt("spo2").toString(), data.getInt("bpm").toString(), String.format("%.1f", data.getDouble("temperature")), String.format("%.1f", data.getDouble("ph")), if(overall == "Healthy") "✓" else "⚠")
+                            _history.value = (_history.value + listOf(newRow)).takeLast(20)
+                            
+                            // Create alerts
+                            if (overall == "At Risk") {
+                                val msg = "Abnormal health readings detected for $cid"
+                                _alerts.value = (listOf(Alert(cid, msg, "Just now", "WARNING", Orange)) + _alerts.value).take(10)
+                            }
                         }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
                     }
-                    
-                    _cattle.value = uiCattleList
-                    _alerts.value = newAlerts
-                    _history.value = newHistory.takeLast(8).reversed()
-                    _isConnected.value = true
-
-                } catch (e: Exception) {
-                    _isConnected.value = false
                 }
-                delay(5000)
             }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                _isConnected.value = false
+                reconnect(url)
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                _isConnected.value = false
+                reconnect(url)
+            }
+        })
+    }
+    
+    private fun reconnect(url: String) {
+        viewModelScope.launch {
+            delay(5000) // 5s reconnect delay
+            if (!_isConnected.value) connectWebSocket(url)
         }
     }
 }

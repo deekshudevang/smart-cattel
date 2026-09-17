@@ -1,0 +1,41 @@
+# Python / Backend
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+env/
+.venv/
+*.db
+*.sqlite3
+backend/smart_cattle.db
+
+# Android
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+
+# Arduino
+*.elf
+*.hex
+*.bin
+*.eep
+build/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*~

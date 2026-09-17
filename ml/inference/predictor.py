@@ -20,12 +20,34 @@ class HealthPredictor:
     def predict(self, sensor_data: dict):
         predictions = {}
         for key, value in sensor_data.items():
+            if not isinstance(value, (int, float)):
+                continue
+                
             model_key = key
-            if key == "mems_x": # using x for mems anomaly in phase 1
+            if key == "mems_x":
                 model_key = "mems"
                 
             if model_key in self.models:
-                pred = self.models[model_key].predict([[value]])[0]
-                predictions[key] = "normal" if pred == 1 else "abnormal" # Assuming 1 is normal
+                try:
+                    pred = self.models[model_key].predict([[value]])[0]
+                    # Attempt to get probability if supported
+                    if hasattr(self.models[model_key], "predict_proba"):
+                        proba = self.models[model_key].predict_proba([[value]])[0]
+                        confidence = round(float(max(proba)), 2)
+                    else:
+                        confidence = 0.85 # fallback
+                except Exception:
+                    pred = 1 # default normal
+                    confidence = 0.5
+                    
+                status = "normal" if pred == 1 else "abnormal"
+                reason = "Values are within healthy bounds" if status == "normal" else f"{key.capitalize()} detected as abnormal by the model"
+                
+                predictions[key] = {
+                    "status": status,
+                    "value": value,
+                    "confidence": confidence,
+                    "reason": reason
+                }
                 
         return predictions

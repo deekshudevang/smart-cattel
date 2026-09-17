@@ -58,6 +58,7 @@ void setup() {
     setupGSM();
     setupLCD();
     setupMEMS();
+    setupDHT();
 
     if (sensor.begin() && sensor.setSamplingRate(kSamplingRate)) {
         lcd.print("Sensor Ready");
@@ -72,9 +73,8 @@ void setup() {
 void loop() {
     readLDR();
     readMEMS();
-    // Assuming DHT is read in loop, but we didn't fully write DHT logic in scaffold.
-    // Let's use the original DHT code inline since DHT is simple.
-    // Wait, the user DHT logic was: temperature = dht.readTemperature();
+    readDHT();
+    
     
     // Read MAX30102
     auto sample = sensor.readSample(100);
@@ -141,8 +141,8 @@ void loop() {
                         sd.cattle_id = CATTLE_ID;
                         sd.spo2 = displaySpO2;
                         sd.bpm = displayBPM;
-                        sd.temperature = 0.0; // Needs DHT
-                        sd.humidity = 0.0;
+                        sd.temperature = current_temperature;
+                        sd.humidity = current_humidity;
                         sd.mems_x = current_mems_x;
                         sd.mems_y = current_mems_y;
                         sd.mems_z = current_mems_z;

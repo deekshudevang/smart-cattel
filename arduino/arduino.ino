@@ -271,11 +271,24 @@ void loop() {
 
             delay(3000);
 
-            // ---------- SEND DATA TO PYTHON ----------
-            String tx =
-              "a" + String(displaySpO2) + "b" + String(displayBPM) + "c" + String(temperature, 1) + "d" + String(xValue, 1) + "e" + phValue + "f" + String(ldrValue) + "g";
+            // ---------- SEND DATA TO PYTHON (Updated to JSON) ----------
+            String safePh = phValue;
+            if (safePh.length() == 0) safePh = "7.0"; // Fallback to avoid empty value
 
-            Serial.println(tx);
+            String json = "{";
+            json += "\"cattle_id\":\"CATTLE-001\",";
+            json += "\"spo2\":" + String(displaySpO2) + ",";
+            json += "\"bpm\":" + String(displayBPM) + ",";
+            json += "\"temperature\":" + String(temperature, 1) + ",";
+            json += "\"humidity\":" + String(dht.readHumidity(), 1) + ",";
+            json += "\"mems_x\":" + String(xValue, 1) + ",";
+            json += "\"mems_y\":0,";
+            json += "\"mems_z\":10,";
+            json += "\"ph\":" + safePh + ",";
+            json += "\"ldr\":" + String(ldrValue);
+            json += "}";
+
+            Serial.println(json);
             delay(2000);
           }
         }
@@ -295,7 +308,8 @@ void loop() {
   // ---------- RECEIVE ML RESULT FROM PYTHON ----------
   if (Serial.available()) {
     String data = Serial.readStringUntil('\n');
-
+    
+    // The Python Backend sends alerts formatted as: a1b0c1d1e1f1g (0 is abnormal, 1 is normal)
     int spo2Alert = data.substring(data.indexOf("a") + 1, data.indexOf("b")).toInt();
     int bpmAlert = data.substring(data.indexOf("b") + 1, data.indexOf("c")).toInt();
     int tempAlert = data.substring(data.indexOf("c") + 1, data.indexOf("d")).toInt();

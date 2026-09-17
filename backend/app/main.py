@@ -5,39 +5,55 @@ import asyncio
 import threading
 import time
 import random
+import logging
 
-# Fix paths so imports work from project root
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from database.database import engine, SessionLocal, get_db, Base
+from database.database import engine, SessionLocal, get_db
 from database import models
 from websocket.manager import manager
+from .config import settings
+from .services import SensorService, PredictionService
+from .auth import get_current_user, require_admin
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
-# ML predictor — load directly since ml/ is at project root
-sys.path.insert(0, os.path.join(PROJECT_ROOT, "ml", "inference"))
-from predictor import HealthPredictor
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-# Create tables
+# Initialize rate limiter
+limiter = Limiter(key_func=get_remote_address)
+
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Smart Cattle Health Monitoring API")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Allow Android app to connect
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-predictor = HealthPredictor()
+prediction_service = PredictionService()
+sensor_service = SensorService(prediction_service)
 
-# ── Sensor data simulator (replaces Arduino when hardware is absent) ──
+# Global error handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(status_code=500, content={"message": "Internal server error"})
 
 def generate_fake_reading(cattle_id: str) -> dict:
     return {
@@ -53,161 +69,77 @@ def generate_fake_reading(cattle_id: str) -> dict:
         "ldr": random.randint(100, 900),
     }
 
-def save_reading_to_db(data: dict):
-    db = SessionLocal()
-    try:
-        reading = models.SensorReading(
-            cattle_id=data.get("cattle_id"),
-            spo2=data.get("spo2"),
-            bpm=data.get("bpm"),
-            temperature=data.get("temperature"),
-            humidity=data.get("humidity"),
-            mems_x=data.get("mems_x"),
-            mems_y=data.get("mems_y"),
-            mems_z=data.get("mems_z"),
-            ph=data.get("ph"),
-            ldr=data.get("ldr"),
-        )
-        db.add(reading)
-        db.commit()
-        db.refresh(reading)
-        return reading.id
-    finally:
-        db.close()
-
-def save_prediction_to_db(reading_id, preds):
-    db = SessionLocal()
-    try:
-        overall = "abnormal" if any(v == "abnormal" for v in preds.values()) else "normal"
-        prediction = models.Prediction(
-            reading_id=reading_id,
-            spo2_status=preds.get("spo2", "normal"),
-            bpm_status=preds.get("bpm", "normal"),
-            temperature_status=preds.get("temperature", "normal"),
-            mems_status=preds.get("mems", "normal"),
-            ph_status=preds.get("ph", "normal"),
-            ldr_status=preds.get("ldr", "normal"),
-            overall_status=overall,
-        )
-        db.add(prediction)
-        db.commit()
-    finally:
-        db.close()
-
-def process_reading(data: dict):
-    reading_id = save_reading_to_db(data)
-    preds = predictor.predict(data)
-    save_prediction_to_db(reading_id, preds)
-    return {"reading_id": reading_id, "predictions": preds}
-
-# Background simulator thread
 simulator_running = False
 
 def _simulator_loop():
     cattle_ids = ["CATTLE-001", "CATTLE-002", "CATTLE-003"]
     while simulator_running:
         for cid in cattle_ids:
-            data = generate_fake_reading(cid)
-            result = process_reading(data)
-            payload = json.dumps({
-                "type": "sensor_update",
-                "cattle_id": cid,
-                "data": data,
-                "health": result["predictions"],
-            })
             try:
+                data = generate_fake_reading(cid)
                 loop = asyncio.new_event_loop()
-                loop.run_until_complete(manager.broadcast(payload))
+                loop.run_until_complete(sensor_service.process_reading(data, manager))
                 loop.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Simulator error for {cid}: {e}")
         time.sleep(5)
 
-# Arduino serial callback — processes real hardware data
 def handle_arduino_data(data: dict):
-    """Called by SerialReader when real Arduino data arrives."""
-    if "cattle_id" not in data:
-        data["cattle_id"] = "CATTLE-001"  # Default for single-cattle setups
-    
-    result = process_reading(data)
-    preds = result["predictions"]
-    
-    # Broadcast to WebSocket clients
-    payload = json.dumps({
-        "type": "sensor_update",
-        "cattle_id": data["cattle_id"],
-        "data": data,
-        "health": preds,
-    })
     try:
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(manager.broadcast(payload))
+        result = loop.run_until_complete(sensor_service.process_reading(data, manager))
         loop.close()
-    except Exception:
-        pass
-    
-    # Send prediction back to Arduino: a{0/1}b{0/1}c{0/1}d{0/1}e{0/1}f{0/1}g
-    a = "1" if preds.get("spo2") == "normal" else "0"
-    b = "1" if preds.get("bpm") == "normal" else "0"
-    c = "1" if preds.get("temperature") == "normal" else "0"
-    d = "1" if preds.get("mems") == "normal" else "0"
-    e = "1" if preds.get("ph") == "normal" else "0"
-    f = "1" if preds.get("ldr") == "normal" else "0"
-    serial_reader.send_alert(f"a{a}b{b}c{c}d{d}e{e}f{f}g")
-    print(f"[ARDUINO] {data['cattle_id']}: overall={'abnormal' if '0' in [a,b,c,d,e,f] else 'normal'}")
-
-# ── Lifecycle ──
+        
+        preds = result["predictions"]
+        a = "1" if preds.get("spo2", {}).get("status") == "normal" else "0"
+        b = "1" if preds.get("bpm", {}).get("status") == "normal" else "0"
+        c = "1" if preds.get("temperature", {}).get("status") == "normal" else "0"
+        d = "1" if preds.get("mems", {}).get("status") == "normal" else "0"
+        e = "1" if preds.get("ph", {}).get("status") == "normal" else "0"
+        f = "1" if preds.get("ldr", {}).get("status") == "normal" else "0"
+        
+        if serial_reader:
+            serial_reader.send_alert(f"a{a}b{b}c{c}d{d}e{e}f{f}g")
+        logger.info(f"[ARDUINO] {data.get('cattle_id', 'unknown')}: overall={'abnormal' if '0' in [a,b,c,d,e,f] else 'normal'}")
+    except Exception as e:
+        logger.error(f"Arduino data handling error: {e}")
 
 serial_reader = None
 
 def _try_arduino():
-    """Try to connect to Arduino on COM4. Returns True if successful."""
     global serial_reader
-    try:
-        from serial_mod.reader import SerialReader
-        serial_reader = SerialReader(port="COM4")
-        serial_reader.start(callback=handle_arduino_data)
-        return True
-    except Exception:
-        pass
-    
-    # Try direct import
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "serial"))
         from reader import SerialReader as SR
-        serial_reader = SR(port="COM4")
+        serial_reader = SR(port=settings.SERIAL_PORT)
         serial_reader.start(callback=handle_arduino_data)
         return True
     except Exception as e:
-        print(f"Arduino not available ({e}). Using simulator.")
+        logger.warning(f"Arduino not available ({e}). Using simulator.")
         return False
 
 @app.on_event("startup")
 def startup_event():
     global simulator_running
-
-    # Seed cattle entries if empty
     db = SessionLocal()
-    if db.query(models.Cattle).count() == 0:
-        for cid, name in [("CATTLE-001", "Lakshmi"), ("CATTLE-002", "Ganga"), ("CATTLE-003", "Nandi")]:
-            db.add(models.Cattle(cattle_id=cid, name=name))
-        db.commit()
-    db.close()
+    try:
+        if db.query(models.Cattle).count() == 0:
+            for cid, name in [("CATTLE-001", "Lakshmi"), ("CATTLE-002", "Ganga"), ("CATTLE-003", "Nandi")]:
+                db.add(models.Cattle(cattle_id=cid, name=name))
+            db.commit()
+    finally:
+        db.close()
 
-    # Try Arduino first, fall back to simulator
     if _try_arduino():
-        print("=" * 50)
-        print("ARDUINO MODE: Reading real sensor data from COM4")
-        print("Data visible at: http://localhost:8000/docs")
-        print("=" * 50)
+        logger.info("=" * 50)
+        logger.info(f"ARDUINO MODE: Reading real sensor data from {settings.SERIAL_PORT}")
+        logger.info("=" * 50)
     else:
         simulator_running = True
         threading.Thread(target=_simulator_loop, daemon=True).start()
-        print("=" * 50)
-        print("SIMULATOR MODE: Generating fake sensor data every 5s")
-        print("Plug in Arduino on COM4 and restart to use real data")
-        print("Data visible at: http://localhost:8000/docs")
-        print("=" * 50)
+        logger.info("=" * 50)
+        logger.info("SIMULATOR MODE: Generating fake sensor data")
+        logger.info("=" * 50)
 
 @app.on_event("shutdown")
 def shutdown_event():
@@ -216,33 +148,23 @@ def shutdown_event():
     if serial_reader:
         serial_reader.stop()
 
-# ── REST Endpoints ──
-
 @app.get("/api/health")
-def health_check():
-    return {"status": "ok", "models_loaded": len(predictor.models)}
+@limiter.limit("10/minute")
+def health_check(request: Request):
+    return {"status": "ok", "models_loaded": len(prediction_service.predictor.models)}
 
 @app.get("/api/cattle")
-def get_cattle(db: Session = Depends(get_db)):
+def get_cattle(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     cattle_list = db.query(models.Cattle).all()
     return [{"cattle_id": c.cattle_id, "name": c.name, "status": c.status} for c in cattle_list]
 
 @app.get("/api/cattle/{cattle_id}/latest")
-def get_latest_reading(cattle_id: str, db: Session = Depends(get_db)):
-    reading = (
-        db.query(models.SensorReading)
-        .filter(models.SensorReading.cattle_id == cattle_id)
-        .order_by(models.SensorReading.timestamp.desc())
-        .first()
-    )
+def get_latest_reading(cattle_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    reading = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == cattle_id).order_by(models.SensorReading.timestamp.desc()).first()
     if not reading:
-        return {"error": "No readings found"}
+        raise HTTPException(status_code=404, detail="No readings found")
     
-    prediction = (
-        db.query(models.Prediction)
-        .filter(models.Prediction.reading_id == reading.id)
-        .first()
-    )
+    prediction = db.query(models.Prediction).filter(models.Prediction.reading_id == reading.id).first()
     
     return {
         "cattle_id": reading.cattle_id,
@@ -268,14 +190,8 @@ def get_latest_reading(cattle_id: str, db: Session = Depends(get_db)):
     }
 
 @app.get("/api/cattle/{cattle_id}/history")
-def get_history(cattle_id: str, limit: int = Query(default=20), db: Session = Depends(get_db)):
-    readings = (
-        db.query(models.SensorReading)
-        .filter(models.SensorReading.cattle_id == cattle_id)
-        .order_by(models.SensorReading.timestamp.desc())
-        .limit(limit)
-        .all()
-    )
+def get_history(cattle_id: str, limit: int = Query(default=20), db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    readings = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == cattle_id).order_by(models.SensorReading.timestamp.desc()).limit(limit).all()
     return [
         {
             "timestamp": str(r.timestamp),
@@ -289,14 +205,8 @@ def get_history(cattle_id: str, limit: int = Query(default=20), db: Session = De
     ]
 
 @app.get("/api/alerts")
-def get_alerts(db: Session = Depends(get_db)):
-    abnormal = (
-        db.query(models.Prediction)
-        .filter(models.Prediction.overall_status == "abnormal")
-        .order_by(models.Prediction.timestamp.desc())
-        .limit(20)
-        .all()
-    )
+def get_alerts(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    abnormal = db.query(models.Prediction).filter(models.Prediction.overall_status == "abnormal").order_by(models.Prediction.timestamp.desc()).limit(20).all()
     alerts = []
     for p in abnormal:
         reading = db.query(models.SensorReading).filter(models.SensorReading.id == p.reading_id).first()
@@ -314,8 +224,6 @@ def get_alerts(db: Session = Depends(get_db)):
         })
     return alerts
 
-# ── WebSocket ──
-
 @app.websocket("/ws/cattle/{cattle_id}")
 async def websocket_endpoint(websocket: WebSocket, cattle_id: str):
     await manager.connect(websocket)
@@ -327,4 +235,4 @@ async def websocket_endpoint(websocket: WebSocket, cattle_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=settings.API_HOST, port=settings.API_PORT)
