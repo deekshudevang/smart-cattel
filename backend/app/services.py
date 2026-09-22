@@ -45,11 +45,16 @@ class AlertService:
     @staticmethod
     async def broadcast_alert(manager, cattle_id: str, data: dict, preds: dict):
         import json
+        overall = "abnormal" if any(v.get("status") == "abnormal" for v in preds.values()) else "normal"
+        fall_detected = preds.get("mems", {}).get("status") == "abnormal"
+        health_with_overall = dict(preds)
+        health_with_overall["overall"] = overall
+        health_with_overall["fall_detected"] = fall_detected
         payload = json.dumps({
             "type": "sensor_update",
             "cattle_id": cattle_id,
             "data": data,
-            "health": preds,
+            "health": health_with_overall,
         })
         try:
             await manager.broadcast(payload)

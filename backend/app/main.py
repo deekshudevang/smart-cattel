@@ -18,9 +18,9 @@ from sqlalchemy.orm import Session
 from database.database import engine, SessionLocal, get_db
 from database import models
 from websocket.manager import manager
-from .config import settings
-from .services import SensorService, PredictionService
-from .auth import get_current_user, require_admin
+from config import settings
+from services import SensorService, PredictionService
+from auth import get_current_user, require_admin
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -71,48 +71,31 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
     access_token = create_access_token(data={"sub": form_data.username, "role": "ADMIN"})
     return {"access_token": access_token, "token_type": "bearer"}
 
-def generate_fake_reading(cattle_id: str) -> dict:
-    return {
-        "cattle_id": cattle_id,
-        "spo2": random.randint(90, 99),
-        "bpm": random.randint(60, 120),
-        "temperature": round(random.uniform(37.5, 40.0), 1),
-        "humidity": round(random.uniform(40, 80), 1),
-        "mems_x": round(random.uniform(-2, 2), 2),
-        "mems_y": round(random.uniform(-2, 2), 2),
-        "mems_z": round(random.uniform(8, 12), 2),
-        "ph": round(random.uniform(5.5, 8.0), 1),
-        "ldr": random.randint(100, 900),
-    }
+last_arduino_time = 0.0
 
-simulator_running = False
-
-def _simulator_loop():
-    cattle_ids = ["CATTLE-001", "CATTLE-002", "CATTLE-003"]
-    while simulator_running:
-        for cid in cattle_ids:
-            try:
-                data = generate_fake_reading(cid)
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(sensor_service.process_reading(data, manager))
-                loop.close()
-            except Exception as e:
-                logger.error(f"Simulator error for {cid}: {e}")
-        time.sleep(5)
+async def _offline_monitor():
+    while True:
+        await asyncio.sleep(2)
+        if time.time() - last_arduino_time > 5.0:
+            await manager.broadcast(json.dumps({"type": "status", "status": "offline"}))
+        else:
+            await manager.broadcast(json.dumps({"type": "status", "status": "online"}))
 
 def handle_arduino_data(data: dict):
+    global last_arduino_time
+    last_arduino_time = time.time()
     try:
         loop = asyncio.new_event_loop()
         result = loop.run_until_complete(sensor_service.process_reading(data, manager))
         loop.close()
         
         preds = result["predictions"]
-        a = "1" if preds.get("spo2", {}).get("status") == "normal" else "0"
-        b = "1" if preds.get("bpm", {}).get("status") == "normal" else "0"
-        c = "1" if preds.get("temperature", {}).get("status") == "normal" else "0"
-        d = "1" if preds.get("mems", {}).get("status") == "normal" else "0"
-        e = "1" if preds.get("ph", {}).get("status") == "normal" else "0"
-        f = "1" if preds.get("ldr", {}).get("status") == "normal" else "0"
+        a = "1" if preds.get("spo2", {}).get("status", "normal") == "normal" else "0"
+        b = "1" if preds.get("bpm", {}).get("status", "normal") == "normal" else "0"
+        c = "1" if preds.get("temperature", {}).get("status", "normal") == "normal" else "0"
+        d = "1" if preds.get("mems", {}).get("status", "normal") == "normal" else "0"
+        e = "1" if preds.get("ph", {}).get("status", "normal") == "normal" else "0"
+        f = "1" if preds.get("ldr", {}).get("status", "normal") == "normal" else "0"
         
         if serial_reader:
             serial_reader.send_alert(f"a{a}b{b}c{c}d{d}e{e}f{f}g")
@@ -136,7 +119,6 @@ def _try_arduino():
 
 @app.on_event("startup")
 def startup_event():
-    global simulator_running
     db = SessionLocal()
     try:
         if db.query(models.Cattle).count() == 0:
@@ -146,21 +128,19 @@ def startup_event():
     finally:
         db.close()
 
+    asyncio.create_task(_offline_monitor())
+
     if _try_arduino():
         logger.info("=" * 50)
         logger.info(f"ARDUINO MODE: Reading real sensor data from {settings.SERIAL_PORT}")
         logger.info("=" * 50)
     else:
-        simulator_running = True
-        threading.Thread(target=_simulator_loop, daemon=True).start()
         logger.info("=" * 50)
-        logger.info("SIMULATOR MODE: Generating fake sensor data")
+        logger.warning("ARDUINO NOT DETECTED: Running in offline mode")
         logger.info("=" * 50)
 
 @app.on_event("shutdown")
 def shutdown_event():
-    global simulator_running
-    simulator_running = False
     if serial_reader:
         serial_reader.stop()
 
@@ -169,19 +149,26 @@ def shutdown_event():
 def health_check(request: Request):
     return {"status": "ok", "models_loaded": len(prediction_service.predictor.models)}
 
+@app.post("/api/sensor/data")
+async def receive_sensor_data(request: Request):
+    data = await request.json()
+    result = await sensor_service.process_reading(data, manager)
+    return result
+
 @app.get("/api/cattle")
-def get_cattle(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+def get_cattle(db: Session = Depends(get_db)):
     cattle_list = db.query(models.Cattle).all()
     return [{"cattle_id": c.cattle_id, "name": c.name, "status": c.status} for c in cattle_list]
 
 @app.get("/api/cattle/{cattle_id}/latest")
-def get_latest_reading(cattle_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+def get_latest_reading(cattle_id: str, db: Session = Depends(get_db)):
     reading = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == cattle_id).order_by(models.SensorReading.timestamp.desc()).first()
     if not reading:
         raise HTTPException(status_code=404, detail="No readings found")
     
     prediction = db.query(models.Prediction).filter(models.Prediction.reading_id == reading.id).first()
     
+    fall_detected = (prediction.mems_status == "abnormal") if prediction else False
     return {
         "cattle_id": reading.cattle_id,
         "timestamp": str(reading.timestamp),
@@ -194,6 +181,7 @@ def get_latest_reading(cattle_id: str, db: Session = Depends(get_db), current_us
         "mems_z": reading.mems_z,
         "ph": reading.ph,
         "ldr": reading.ldr,
+        "fall_detected": fall_detected,
         "health": {
             "spo2": prediction.spo2_status if prediction else "unknown",
             "bpm": prediction.bpm_status if prediction else "unknown",
@@ -206,36 +194,56 @@ def get_latest_reading(cattle_id: str, db: Session = Depends(get_db), current_us
     }
 
 @app.get("/api/cattle/{cattle_id}/history")
-def get_history(cattle_id: str, limit: int = Query(default=20), db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+def get_history(cattle_id: str, limit: int = Query(default=20), db: Session = Depends(get_db)):
     readings = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == cattle_id).order_by(models.SensorReading.timestamp.desc()).limit(limit).all()
-    return [
-        {
+    result = []
+    for r in readings:
+        prediction = db.query(models.Prediction).filter(models.Prediction.reading_id == r.id).first()
+        fall_detected = (prediction.mems_status == "abnormal") if prediction else False
+        result.append({
             "timestamp": str(r.timestamp),
             "spo2": r.spo2,
             "bpm": r.bpm,
             "temperature": r.temperature,
+            "humidity": r.humidity,
+            "mems_x": r.mems_x,
+            "mems_y": r.mems_y,
+            "mems_z": r.mems_z,
             "ph": r.ph,
             "ldr": r.ldr,
-        }
-        for r in readings
-    ]
+            "fall_detected": fall_detected,
+            "health": {
+                "spo2": prediction.spo2_status if prediction else "unknown",
+                "bpm": prediction.bpm_status if prediction else "unknown",
+                "temperature": prediction.temperature_status if prediction else "unknown",
+                "mems": prediction.mems_status if prediction else "unknown",
+                "ph": prediction.ph_status if prediction else "unknown",
+                "ldr": prediction.ldr_status if prediction else "unknown",
+                "overall": prediction.overall_status if prediction else "unknown",
+            },
+        })
+    return result
 
 @app.get("/api/alerts")
-def get_alerts(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+def get_alerts(db: Session = Depends(get_db)):
     abnormal = db.query(models.Prediction).filter(models.Prediction.overall_status == "abnormal").order_by(models.Prediction.timestamp.desc()).limit(20).all()
     alerts = []
     for p in abnormal:
         reading = db.query(models.SensorReading).filter(models.SensorReading.id == p.reading_id).first()
         cattle = db.query(models.Cattle).filter(models.Cattle.cattle_id == reading.cattle_id).first() if reading else None
+        fall_detected = (p.mems_status == "abnormal")
         details = []
+        if fall_detected: details.append(f"Fall Detected (X:{reading.mems_x:.2f} Y:{reading.mems_y:.2f} Z:{reading.mems_z:.2f})" if reading else "Fall Detected")
         if p.spo2_status == "abnormal": details.append(f"SpO2 abnormal ({reading.spo2}%)" if reading else "SpO2 abnormal")
         if p.bpm_status == "abnormal": details.append(f"BPM abnormal ({reading.bpm})" if reading else "BPM abnormal")
         if p.temperature_status == "abnormal": details.append(f"Temp abnormal ({reading.temperature}°C)" if reading else "Temp abnormal")
         if p.ph_status == "abnormal": details.append(f"pH abnormal ({reading.ph})" if reading else "pH abnormal")
+        if p.ldr_status == "abnormal": details.append(f"Light abnormal ({reading.ldr} lux)" if reading else "Light abnormal")
         alerts.append({
             "cattle_id": reading.cattle_id if reading else "unknown",
             "cattle_name": cattle.name if cattle else "Unknown",
             "timestamp": str(p.timestamp),
+            "fall_detected": fall_detected,
             "details": details,
         })
     return alerts

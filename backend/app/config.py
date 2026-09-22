@@ -3,7 +3,7 @@ from typing import List
 
 class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
-    SERIAL_PORT: str = "COM4"
+    SERIAL_PORT: str = "COM3"
     SERIAL_BAUDRATE: int = 9600
     DATABASE_URL: str = "sqlite:///./smart_cattle.db"
     PROD_DATABASE_URL: str = "postgresql://user:password@localhost/dbname"

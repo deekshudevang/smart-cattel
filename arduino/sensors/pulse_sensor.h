@@ -1,7 +1,7 @@
 #ifndef PULSE_SENSOR_H
 #define PULSE_SENSOR_H
 
-#include <MAX3010x.h>
+#include <MAX30105.h>
 #include "../filters.h"
 
 extern MAX30105 sensor;

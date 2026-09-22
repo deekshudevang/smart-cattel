@@ -13,7 +13,7 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [2/2] Starting the FastAPI Server...
-echo Make sure your Arduino is plugged into COM4.
+echo Make sure your Arduino is plugged into COM3.
 echo.
 cd backend
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000

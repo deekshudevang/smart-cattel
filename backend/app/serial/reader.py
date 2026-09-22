@@ -43,12 +43,15 @@ class SerialReader:
                 if self.ser.in_waiting > 0:
                     line = self.ser.readline().decode('utf-8', errors='ignore').strip()
                     if line:
-                        try:
-                            data = json.loads(line)
-                            if self.on_data_callback:
-                                self.on_data_callback(data)
-                        except json.JSONDecodeError:
-                            print(f"Invalid JSON: {line}")
+                        if line.startswith('{'):
+                            try:
+                                data = json.loads(line)
+                                if self.on_data_callback:
+                                    self.on_data_callback(data)
+                            except json.JSONDecodeError:
+                                print(f"Invalid JSON: {line}")
+                        else:
+                            print(f"Unknown serial data: {line}")
             except serial.SerialException:
                 print("Serial connection lost.")
                 self.ser = None

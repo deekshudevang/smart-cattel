@@ -43,7 +43,7 @@ class HealthPredictor:
                 status = "normal" if pred == 1 else "abnormal"
                 reason = "Values are within healthy bounds" if status == "normal" else f"{key.capitalize()} detected as abnormal by the model"
                 
-                predictions[key] = {
+                predictions[model_key] = {
                     "status": status,
                     "value": value,
                     "confidence": confidence,

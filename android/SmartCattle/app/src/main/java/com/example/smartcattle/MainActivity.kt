@@ -75,13 +75,32 @@ data class Alert(val cattle: String, val msg: String, val time: String, val tag:
 
 // ── Retrofit API Models ──
 data class ApiCattle(val cattle_id: String, val name: String, val status: String)
-data class ApiLatest(val cattle_id: String, val timestamp: String, val spo2: Float, val bpm: Float, val temperature_c: Float, val ph_level: Float, val motion_level: String, val light_level: Float, val health_status: String)
+data class ApiHealth(val spo2: String, val bpm: String, val temperature: String, val mems: String, val ph: String, val ldr: String, val overall: String)
+data class ApiLatest(
+    val cattle_id: String, val timestamp: String,
+    val spo2: Int, val bpm: Int, val temperature: Float,
+    val humidity: Float, val mems_x: Float, val mems_y: Float, val mems_z: Float,
+    val ph: Float, val ldr: Int,
+    val fall_detected: Boolean, val health: ApiHealth
+)
+data class ApiHistoryRow(
+    val timestamp: String,
+    val spo2: Int, val bpm: Int, val temperature: Float,
+    val humidity: Float, val mems_x: Float, val mems_y: Float, val mems_z: Float,
+    val ph: Float, val ldr: Int,
+    val fall_detected: Boolean, val health: ApiHealth
+)
+data class ApiAlert(val cattle_id: String, val cattle_name: String, val timestamp: String, val fall_detected: Boolean, val details: List<String>)
 
 interface ApiService {
     @GET("api/cattle")
     suspend fun getCattle(): List<ApiCattle>
     @GET("api/cattle/{id}/latest")
     suspend fun getLatestReading(@Path("id") id: String): ApiLatest
+    @GET("api/cattle/{id}/history")
+    suspend fun getHistory(@Path("id") id: String): List<ApiHistoryRow>
+    @GET("api/alerts")
+    suspend fun getAlerts(): List<ApiAlert>
 }
 
 class CattleViewModel : ViewModel() {
@@ -114,21 +133,88 @@ class CattleViewModel : ViewModel() {
                 
             connectWebSocket(wsUrl)
             
-            // Initial fetch
+            // Initial fetch — populate dashboard immediately, don't wait for first WS message
             viewModelScope.launch {
                 try {
                     val apiCattleList = api?.getCattle() ?: emptyList()
-                    // Map to basic UI state to show something immediately (Loading state handled here)
                     val uiCattleList = apiCattleList.map { Cattle(it.cattle_id, it.name, "Gir", "4 yrs", it.status, emptyList()) }
                     _cattle.value = uiCattleList
+
+                    // Fetch latest reading for each cattle to populate sensors right away
+                    val populated = uiCattleList.map { c ->
+                        try {
+                            val r = api?.getLatestReading(c.id)
+                            if (r != null) buildCattleFromLatest(r) else c
+                        } catch (e: Exception) { c }
+                    }
+                    _cattle.value = populated
+
+                    // Fetch historical records for the first cattle (CATTLE-001)
+                    if (apiCattleList.isNotEmpty()) {
+                        fetchHistory(apiCattleList[0].cattle_id)
+                    }
+
+                    // Fetch persisted alerts
+                    fetchAlerts()
                 } catch(e: Exception) {
-                    // Empty state on error
+                    e.printStackTrace()
                 }
             }
             
         } catch (e: Exception) {
             _isConnected.value = false
         }
+    }
+
+    private fun buildCattleFromLatest(r: ApiLatest): Cattle {
+        fun sStatus(s: String) = s.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
+        fun sColor(s: String): Color = if (s == "abnormal") Red else Green
+        val fallDetected = r.fall_detected || r.health.mems == "abnormal"
+        val sensors = listOf(
+            Sensor("💓", "SpO2", r.spo2.toString(), "%", sStatus(r.health.spo2), sColor(r.health.spo2)),
+            Sensor("❤️", "Heart Rate", r.bpm.toString(), "bpm", sStatus(r.health.bpm), sColor(r.health.bpm)),
+            Sensor("🌡️", "Body Temp", String.format(Locale.US, "%.1f", r.temperature), "°C", sStatus(r.health.temperature), sColor(r.health.temperature)),
+            Sensor("🧪", "pH Level", String.format(Locale.US, "%.1f", r.ph), "", sStatus(r.health.ph), sColor(r.health.ph)),
+            Sensor("☀️", "Light", r.ldr.toString(), "lux", sStatus(r.health.ldr), sColor(r.health.ldr)),
+            Sensor("🏃", "Motion", String.format(Locale.US, "%.2f", r.mems_x), "g", if (fallDetected) "Fall Detected" else sStatus(r.health.mems), if (fallDetected) Red else sColor(r.health.mems))
+        )
+        val overall = if (r.health.overall == "abnormal") "At Risk" else "Healthy"
+        return Cattle(r.cattle_id, r.cattle_id, "Gir", "4 yrs", overall, sensors)
+    }
+
+    private suspend fun fetchHistory(cattleId: String) {
+        try {
+            val rows = api?.getHistory(cattleId) ?: return
+            val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+            val histRows = rows.map { r ->
+                val ts = try { timeFormat.format(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).parse(r.timestamp.take(19)) ?: Date()) } catch(e: Exception) { r.timestamp.take(8) }
+                listOf(
+                    ts,
+                    r.spo2.toString(),
+                    r.bpm.toString(),
+                    String.format(Locale.US, "%.1f", r.temperature),
+                    String.format(Locale.US, "%.0f", r.humidity),
+                    String.format(Locale.US, "%.1f", r.ph),
+                    if (r.fall_detected) "🚨" else "",
+                    if (r.health.overall == "normal") "✓" else "⚠"
+                )
+            }
+            _history.value = histRows.take(20)
+        } catch (e: Exception) { e.printStackTrace() }
+    }
+
+    private suspend fun fetchAlerts() {
+        try {
+            val apiAlerts = api?.getAlerts() ?: return
+            val uiAlerts = apiAlerts.map { a ->
+                val tag = if (a.fall_detected) "FALL" else "WARNING"
+                val color = if (a.fall_detected) Red else Orange
+                val msg = a.details.joinToString(" • ").ifEmpty { "Abnormal readings for ${a.cattle_id}" }
+                val ts = a.timestamp.take(16)
+                Alert(a.cattle_name.ifEmpty { a.cattle_id }, msg, ts, tag, color)
+            }
+            _alerts.value = uiAlerts
+        } catch (e: Exception) { e.printStackTrace() }
     }
 
     private fun connectWebSocket(url: String) {
@@ -147,39 +233,64 @@ class CattleViewModel : ViewModel() {
                             val data = json.getJSONObject("data")
                             val health = json.getJSONObject("health")
                             
+                            // overall is now a flat string from backend
+                            val overallStatus = health.optString("overall", "normal")
+                            val fallDetected = health.optBoolean("fall_detected", false)
+
+                            fun sStatus(key: String): String = health.optJSONObject(key)?.optString("status", "normal")?.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() } ?: "Normal"
+                            fun sColor(key: String): Color = if ((health.optJSONObject(key)?.optString("status") ?: "normal") == "abnormal") Red else Green
+
+                            val memsStatus = if (fallDetected) "Fall Detected" else sStatus("mems")
+                            val memsColor = if (fallDetected || (health.optJSONObject("mems")?.optString("status") == "abnormal")) Red else Green
+
                             val sensors = listOf(
-                                Sensor("💓", "SpO2", data.getInt("spo2").toString(), "%", health.optJSONObject("spo2")?.optString("status") ?: "Normal", Green),
-                                Sensor("❤\u200D🩹", "Heart Rate", data.getInt("bpm").toString(), "bpm", health.optJSONObject("bpm")?.optString("status") ?: "Normal", Green),
-                                Sensor("🌡️", "Body Temp", String.format("%.1f", data.getDouble("temperature")), "°C", health.optJSONObject("temperature")?.optString("status") ?: "Normal", Green),
-                                Sensor("🧪", "pH Level", String.format("%.1f", data.getDouble("ph")), "", health.optJSONObject("ph")?.optString("status") ?: "Normal", Green),
-                                Sensor("☀️", "Light", data.getInt("ldr").toString(), "lux", health.optJSONObject("ldr")?.optString("status") ?: "Normal", Cyan)
+                                Sensor("💓", "SpO2", data.getInt("spo2").toString(), "%", sStatus("spo2"), sColor("spo2")),
+                                Sensor("❤️", "Heart Rate", data.getInt("bpm").toString(), "bpm", sStatus("bpm"), sColor("bpm")),
+                                Sensor("🌡️", "Body Temp", String.format(Locale.US, "%.1f", data.getDouble("temperature")), "°C", sStatus("temperature"), sColor("temperature")),
+                                Sensor("🧪", "pH Level", String.format(Locale.US, "%.1f", data.getDouble("ph")), "", sStatus("ph"), sColor("ph")),
+                                Sensor("☀️", "Light", data.getInt("ldr").toString(), "lux", sStatus("ldr"), sColor("ldr")),
+                                Sensor("🏃", "Motion", String.format(Locale.US, "%.2f", data.optDouble("mems_x", 0.0)), "g", memsStatus, memsColor)
                             )
-                            
-                            // Check overall health
-                            var overall = "Healthy"
-                            if (health.keys().asSequence().any { health.optJSONObject(it)?.optString("status") == "abnormal" }) {
-                                overall = "At Risk"
-                            }
-                            
+
+                            val overall = if (overallStatus == "abnormal") "At Risk" else "Healthy"
+
                             // Update cattle state
                             val currentCattle = _cattle.value.toMutableList()
                             val idx = currentCattle.indexOfFirst { it.id == cid }
                             if (idx != -1) {
-                                val c = currentCattle[idx]
-                                currentCattle[idx] = c.copy(overall = overall, sensors = sensors)
+                                currentCattle[idx] = currentCattle[idx].copy(overall = overall, sensors = sensors)
                                 _cattle.value = currentCattle
                             }
-                            
-                            // Update history
+
+                            // Update history — Time | SpO2 | BPM | Temp | Hum | pH | Fall | Status
                             val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
                             val t = timeFormat.format(Date())
-                            val newRow = listOf(t, data.getInt("spo2").toString(), data.getInt("bpm").toString(), String.format("%.1f", data.getDouble("temperature")), String.format("%.1f", data.getDouble("ph")), if(overall == "Healthy") "✓" else "⚠")
+                            val fallIcon = if (fallDetected) "🚨" else ""
+                            val newRow = listOf(
+                                t,
+                                data.getInt("spo2").toString(),
+                                data.getInt("bpm").toString(),
+                                String.format(Locale.US, "%.1f", data.getDouble("temperature")),
+                                String.format(Locale.US, "%.0f", data.optDouble("humidity", 0.0)),
+                                String.format(Locale.US, "%.1f", data.getDouble("ph")),
+                                fallIcon,
+                                if (overall == "Healthy") "✓" else "⚠"
+                            )
                             _history.value = (_history.value + listOf(newRow)).takeLast(20)
-                            
+
                             // Create alerts
                             if (overall == "At Risk") {
-                                val msg = "Abnormal health readings detected for $cid"
-                                _alerts.value = (listOf(Alert(cid, msg, "Just now", "WARNING", Orange)) + _alerts.value).take(10)
+                                val alertDetails = buildString {
+                                    if (health.optJSONObject("spo2")?.optString("status") == "abnormal") append("SpO2 abnormal (${data.getInt("spo2")}%) • ")
+                                    if (health.optJSONObject("bpm")?.optString("status") == "abnormal") append("BPM abnormal (${data.getInt("bpm")}) • ")
+                                    if (health.optJSONObject("temperature")?.optString("status") == "abnormal") append("Temp abnormal (${String.format(Locale.US,"%.1f",data.getDouble("temperature"))}°C) • ")
+                                    if (health.optJSONObject("ph")?.optString("status") == "abnormal") append("pH abnormal (${String.format(Locale.US,"%.1f",data.getDouble("ph"))}) • ")
+                                    if (fallDetected) append("Fall Detected! ")
+                                }.trimEnd(' ', '•')
+                                val msg = alertDetails.ifEmpty { "Abnormal readings for $cid" }
+                                val tag = if (fallDetected) "FALL" else "WARNING"
+                                val color = if (fallDetected) Red else Orange
+                                _alerts.value = (listOf(Alert(cid, msg, "Just now", tag, color)) + _alerts.value).take(10)
                             }
                         }
                     } catch (e: Exception) {
@@ -390,9 +501,9 @@ fun DashboardTab(viewModel: CattleViewModel) {
     val cattle by viewModel.cattle.collectAsState()
     
     // Calculate averages dynamically from real data
-    val avgSpo2 = if (cattle.isNotEmpty()) cattle.mapNotNull { c -> c.sensors.find { it.label == "SpO2" }?.value?.toIntOrNull() }.average().takeIf { !it.isNaN() }?.toInt()?.toString()?.plus("%") ?: "--" else "--"
-    val avgBpm = if (cattle.isNotEmpty()) cattle.mapNotNull { c -> c.sensors.find { it.label == "Heart Rate" }?.value?.toIntOrNull() }.average().takeIf { !it.isNaN() }?.toInt()?.toString() ?: "--" else "--"
-    val avgTemp = if (cattle.isNotEmpty()) cattle.mapNotNull { c -> c.sensors.find { it.label == "Body Temp" }?.value?.toDoubleOrNull() }.average().takeIf { !it.isNaN() }?.let { String.format(java.util.Locale.US, "%.1f°", it) } ?: "--" else "--"
+    val avgSpo2 = if (cattle.isNotEmpty()) cattle.mapNotNull { c -> c.sensors.find { it.label == "SpO2" }?.value?.toIntOrNull()?.takeIf { it > 0 } }.average().takeIf { !it.isNaN() }?.toInt()?.toString()?.plus("%") ?: "--" else "--"
+    val avgBpm = if (cattle.isNotEmpty()) cattle.mapNotNull { c -> c.sensors.find { it.label == "Heart Rate" }?.value?.toIntOrNull()?.takeIf { it > 0 } }.average().takeIf { !it.isNaN() }?.toInt()?.toString() ?: "--" else "--"
+    val avgTemp = if (cattle.isNotEmpty()) cattle.mapNotNull { c -> c.sensors.find { it.label == "Body Temp" }?.value?.toDoubleOrNull()?.takeIf { it > 0.0 } }.average().takeIf { !it.isNaN() }?.let { String.format(java.util.Locale.US, "%.1f°", it) } ?: "--" else "--"
     
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Color.Transparent)) {
@@ -508,19 +619,38 @@ fun AlertsTab(viewModel: CattleViewModel) {
 @Composable
 fun HistoryTab(viewModel: CattleViewModel) {
     val history by viewModel.history.collectAsState()
+    val headers = listOf("Time", "SpO2", "BPM", "Temp", "Hum", "pH", "Fall", "OK")
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) { Box(Modifier.width(3.dp).height(18.dp).clip(RoundedCornerShape(2.dp)).background(Green)); Spacer(Modifier.width(8.dp)); Text("Sensor History", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = White) }
-        Text("Live Readings log", fontSize = 11.sp, color = Grey)
+        Text("Readings log (live + persisted)", fontSize = 11.sp, color = Grey)
         Spacer(Modifier.height(14.dp))
 
         Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = BgCard)) {
             Column {
-                Row(Modifier.background(Blue.copy(alpha = 0.08f)).padding(horizontal = 12.dp, vertical = 10.dp)) { listOf("Time", "SpO2", "BPM", "Temp", "pH", "").forEach { Text(it, Modifier.weight(1f), fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Blue, textAlign = TextAlign.Center) } }
-                if (history.isEmpty()) Text("No data yet...", color = Grey, modifier = Modifier.padding(16.dp))
+                // Header
+                Row(Modifier.background(Blue.copy(alpha = 0.08f)).padding(horizontal = 8.dp, vertical = 10.dp)) {
+                    headers.forEach {
+                        Text(it, Modifier.weight(1f), fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Blue, textAlign = TextAlign.Center)
+                    }
+                }
+                if (history.isEmpty()) Text("No data yet — waiting for live sensor data...", color = Grey, modifier = Modifier.padding(16.dp))
                 history.forEachIndexed { i, row ->
+                    val hasFall = row.getOrElse(6) { "" } == "🚨"
                     val warn = row.last() == "⚠"
-                    Row(Modifier.background(if (warn) Red.copy(alpha = 0.04f) else Color.Transparent).padding(horizontal = 12.dp, vertical = 9.dp)) {
-                        row.forEachIndexed { j, cell -> Text(cell, Modifier.weight(1f), fontSize = 11.sp, color = when { j == row.size - 1 && warn -> Orange; j == row.size - 1 -> Green; else -> White }, textAlign = TextAlign.Center) }
+                    Row(
+                        Modifier
+                            .background(when { hasFall -> Red.copy(alpha = 0.08f); warn -> Orange.copy(alpha = 0.04f); else -> Color.Transparent })
+                            .padding(horizontal = 8.dp, vertical = 8.dp)
+                    ) {
+                        row.forEachIndexed { j, cell ->
+                            val cellColor = when {
+                                j == 6 && hasFall -> Red           // Fall column
+                                j == row.size - 1 && warn -> Orange // Status warn
+                                j == row.size - 1 -> Green          // Status ok
+                                else -> White
+                            }
+                            Text(cell, Modifier.weight(1f), fontSize = 10.sp, color = cellColor, textAlign = TextAlign.Center)
+                        }
                     }
                     if (i < history.size - 1) Divider(color = Border, thickness = 0.3.dp)
                 }
