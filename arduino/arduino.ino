@@ -16,15 +16,16 @@ TinyGPSPlus gps;
 String LAT = "0.000000";
 String LON = "0.000000";
 
-// ---------- pH UART Sensor ----------
-#define PH_SERIAL Serial3
+// ---------- pH Analog Sensor ----------
+#define PH_PIN A1
+float phVoltage = 0.0;
+float phValueReal = 0.0;
+bool ph_valid = false;
+
+// ---------- LDR ----------
 #define LDR_PIN A2
 int ldrValue = 0;
 bool ldr_valid = false;
-
-String phData = "";
-String phValue = "";
-bool ph_valid = false;
 
 // ---------- DHT11 ----------
 #define DHTPIN 42
@@ -98,7 +99,6 @@ long crossed_time = 0;
 
 void setup() {
   Serial.begin(9600);
-  PH_SERIAL.begin(9600);
   GPS_SERIAL.begin(9600);
   GSM_SERIAL.begin(9600);
   
@@ -163,23 +163,18 @@ void loop() {
   }
 
   // ---------- pH Read ----------
-  while (PH_SERIAL.available()) {
-    char c = PH_SERIAL.read();
-    Serial.write(c);
-    if (c != '\n' && c != '\r') {
-      phData += c;
-    } else {
-      if (phData.length() > 0) {
-        int p1 = phData.indexOf("PH:");
-        int p2 = phData.indexOf(",");
-        if (p1 != -1 && p2 != -1) {
-          phValue = phData.substring(p1 + 3, p2);
-          ph_valid = true;
-        }
-        phData = "";
-      }
-    }
+  int phRaw = analogRead(PH_PIN);
+  phVoltage = phRaw * (5.0 / 1023.0);
+  // Using a generic pH formula: pH = 3.5 * voltage + offset
+  // Adjust the 3.5 and offset (e.g. 0.0) according to your specific sensor calibration
+  phValueReal = 3.5 * phVoltage;
+  
+  if (phValueReal >= 0.0 && phValueReal <= 14.0) {
+    ph_valid = true;
+  } else {
+    ph_valid = false;
   }
+
 
   // ---------- MAX30102 Read ----------
   if (max_valid) {
@@ -273,7 +268,7 @@ void loop() {
 
     lcd.setCursor(0, 1);
     lcd.print("p:");
-    if (ph_valid && phValue.length() > 0) lcd.print(phValue);
+    if (ph_valid) lcd.print(phValueReal, 2);
     else lcd.print("--");
     
     lcd.print(" L:");
@@ -324,8 +319,8 @@ void loop() {
     }
 
     // pH
-    if (ph_valid && phValue.length() > 0) {
-      json += "\"ph\":" + phValue + ",";
+    if (ph_valid) {
+      json += "\"ph\":" + String(phValueReal, 2) + ",";
       json += "\"ph_valid\":true,";
     } else {
       json += "\"ph\":null,";

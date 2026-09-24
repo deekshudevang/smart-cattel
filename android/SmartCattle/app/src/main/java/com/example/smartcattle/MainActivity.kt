@@ -422,8 +422,7 @@ class CattleViewModel : ViewModel() {
     private fun connectWebSocket(url: String) {
         val request = Request.Builder().url(url).build()
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) { _isConnected.value = true }
-
+-
             override fun onMessage(webSocket: WebSocket, text: String) {
                 viewModelScope.launch(Dispatchers.Main) {
                     try {
