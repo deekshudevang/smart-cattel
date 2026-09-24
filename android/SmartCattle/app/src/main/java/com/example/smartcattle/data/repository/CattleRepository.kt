@@ -40,6 +40,12 @@ class CattleRepository(private val api: CattleApi, private val wsManager: WebSoc
 
     // ── REST helpers ──
 
+    suspend fun fetchCattle(): List<com.example.smartcattle.data.api.ApiCattleResponse> = try {
+        api.getCattle()
+    } catch (e: Exception) {
+        emptyList()
+    }
+
     suspend fun fetchLatest(cattleId: String): SensorData? = try {
         api.getLatest(cattleId).toSensorData()
     } catch (e: Exception) {
@@ -54,6 +60,30 @@ class CattleRepository(private val api: CattleApi, private val wsManager: WebSoc
 
     suspend fun fetchAlerts(): List<AlertRow> = try {
         api.getAlerts().map { it.toAlertRow() }
+    } catch (e: Exception) {
+        emptyList()
+    }
+
+    suspend fun fetchDashboardSummary() = try {
+        api.getDashboardSummary()
+    } catch (e: Exception) {
+        null
+    }
+
+    suspend fun fetchMilkProduction(cattleId: String) = try {
+        api.getMilkProduction(cattleId)
+    } catch (e: Exception) {
+        emptyList()
+    }
+
+    suspend fun fetchFeedConsumption(cattleId: String) = try {
+        api.getFeedConsumption(cattleId)
+    } catch (e: Exception) {
+        emptyList()
+    }
+
+    suspend fun fetchActivity(cattleId: String) = try {
+        api.getActivity(cattleId)
     } catch (e: Exception) {
         emptyList()
     }

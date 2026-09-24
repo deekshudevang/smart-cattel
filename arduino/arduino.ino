@@ -1,7 +1,7 @@
 #include <DHT.h>
 #include <Wire.h>
 #include "filters.h"
-#include <MAX3010x.h>
+#include <MAX30105.h>
 #include <TinyGPS++.h>
 #include <LiquidCrystal.h>
 #include <SoftwareSerial.h>
@@ -38,7 +38,6 @@ bool dht_valid = false;
 
 // ---------- MAX30102 ----------
 MAX30105 sensor;
-const auto kSamplingRate = sensor.SAMPLING_RATE_800SPS;
 const float kSamplingFrequency = 400.0;
 bool max_valid = false;
 
@@ -111,7 +110,8 @@ void setup() {
   lcd.print("WAITING DATA...");
   lcd_showing_waiting = true;
 
-  if (sensor.begin() && sensor.setSamplingRate(kSamplingRate)) {
+  if (sensor.begin()) {
+    sensor.setup(); // Configure sensor with default settings
     max_valid = true;
     Serial.println("MAX30102 initialized");
   } else {
@@ -129,6 +129,11 @@ void setup() {
   }
 
   dht.begin();
+  Serial.println("DHT11 initialized");
+  Serial.println("LDR initialized");
+  Serial.println("pH Sensor initialized");
+  Serial.println("GPS initialized");
+  Serial.println("GSM initialized");
 }
 
 void loop() {
@@ -178,11 +183,11 @@ void loop() {
 
   // ---------- MAX30102 Read ----------
   if (max_valid) {
-    auto sample = sensor.readSample(50);
-    float current_value_red = sample.red;
-    float current_value_ir = sample.ir;
+    sensor.check(); // Update sensor FIFO
+    float current_value_red = sensor.getRed();
+    float current_value_ir = sensor.getIR();
 
-    if (sample.red > kFingerThreshold) {
+    if (current_value_red > kFingerThreshold) {
       if (millis() - finger_timestamp > kFingerCooldownMs) {
         finger_detected = true;
       }

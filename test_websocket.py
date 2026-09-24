@@ -1,62 +1,57 @@
 import requests
 import time
-import random
 import json
+import serial
+import threading
+import sys
 
 URL = "http://localhost:8000/api/sensor/data"
-CATTLE_IDS = ["CATTLE-001", "CATTLE-002", "CATTLE-003"]
+PORT = "COM3"  # Default port, change if necessary
+BAUDRATE = 9600
 
-def generate_fake_data(cattle_id, is_abnormal=False):
-    if is_abnormal:
-        return {
-            "cattle_id": cattle_id,
-            "spo2": random.randint(80, 89),
-            "bpm": random.randint(120, 160),
-            "temperature": round(random.uniform(40.0, 42.0), 1),
-            "humidity": round(random.uniform(40, 80), 1),
-            "mems_x": round(random.uniform(5, 10), 2),
-            "mems_y": round(random.uniform(5, 10), 2),
-            "mems_z": round(random.uniform(2, 5), 2),
-            "ph": round(random.uniform(4.0, 5.0), 1),
-            "ldr": random.randint(10, 50),
-        }
-    else:
-        return {
-            "cattle_id": cattle_id,
-            "spo2": random.randint(95, 99),
-            "bpm": random.randint(60, 80),
-            "temperature": round(random.uniform(37.5, 39.0), 1),
-            "humidity": round(random.uniform(40, 80), 1),
-            "mems_x": round(random.uniform(-1, 1), 2),
-            "mems_y": round(random.uniform(-1, 1), 2),
-            "mems_z": round(random.uniform(9, 11), 2),
-            "ph": round(random.uniform(6.0, 7.5), 1),
-            "ldr": random.randint(300, 800),
-        }
+def read_from_serial():
+    print(f"Connecting to Arduino on {PORT}...")
+    try:
+        ser = serial.Serial(PORT, BAUDRATE, timeout=1)
+        time.sleep(2) # Wait for arduino reset
+        print(f"Connected to {PORT}. Waiting for data...")
+    except serial.SerialException as e:
+        print(f"Failed to connect to Arduino on {PORT}: {e}")
+        print("Please check your connection and port name.")
+        sys.exit(1)
 
-print(f"Starting to send fake sensor data to {URL}...")
-print("Press Ctrl+C to stop.")
+    try:
+        while True:
+            if ser.in_waiting > 0:
+                line = ser.readline().decode('utf-8', errors='ignore').strip()
+                if line:
+                    if line.startswith('{'):
+                        try:
+                            data = json.loads(line)
+                            
+                            # Ensure cattle_id exists, fallback to default if not provided by arduino
+                            if "cattle_id" not in data:
+                                data["cattle_id"] = "CATTLE-001"
+                                
+                            try:
+                                response = requests.post(URL, json=data)
+                                if response.status_code == 200:
+                                    print(f"[ARDUINO] Sent data: {json.dumps(data)}")
+                                else:
+                                    print(f"Failed to send data. Status code: {response.status_code}")
+                            except requests.exceptions.RequestException as e:
+                                print(f"Error connecting to server: {e}")
+                                
+                        except json.JSONDecodeError:
+                            print(f"Invalid JSON from Arduino: {line}")
+                    else:
+                        print(f"Unknown serial data: {line}")
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print("\nStopped reading from serial.")
+    finally:
+        ser.close()
 
-iteration = 0
-try:
-    while True:
-        iteration += 1
-        # Make every 5th reading abnormal to see alerts
-        is_abnormal = (iteration % 5 == 0)
-        
-        for cattle_id in CATTLE_IDS:
-            data = generate_fake_data(cattle_id, is_abnormal=is_abnormal)
-            try:
-                response = requests.post(URL, json=data)
-                if response.status_code == 200:
-                    status = "ABNORMAL" if is_abnormal else "NORMAL"
-                    print(f"[{status}] Sent data for {cattle_id}: {json.dumps(data)}")
-                else:
-                    print(f"Failed to send data. Status code: {response.status_code}")
-            except requests.exceptions.RequestException as e:
-                print(f"Error connecting to server: {e}")
-                
-        print("-" * 50)
-        time.sleep(3) # Send updates every 3 seconds
-except KeyboardInterrupt:
-    print("\nStopped sending data.")
+if __name__ == "__main__":
+    print(f"Starting hardware data bridge to {URL}...")
+    read_from_serial()

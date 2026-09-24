@@ -13,11 +13,16 @@ class DatabaseService:
     def save_reading(data: dict) -> int:
         db = SessionLocal()
         try:
-            reading = models.SensorReading(**data)
+            valid_keys = models.SensorReading.__table__.columns.keys()
+            filtered_data = {k: v for k, v in data.items() if k in valid_keys}
+            reading = models.SensorReading(**filtered_data)
             db.add(reading)
             db.commit()
             db.refresh(reading)
             return reading.id
+        except Exception:
+            db.rollback()
+            raise
         finally:
             db.close()
 
@@ -38,6 +43,9 @@ class DatabaseService:
             )
             db.add(prediction)
             db.commit()
+        except Exception:
+            db.rollback()
+            raise
         finally:
             db.close()
 
@@ -81,8 +89,18 @@ class SensorService:
 
     async def process_reading(self, data: dict, manager):
         validated_data = ValidationService.validate(data)
+        import logging
+        logger = logging.getLogger("sensor_service")
+        logger.info(
+            f"[SENSOR IN] cattle={validated_data.get('cattle_id')} "
+            f"bpm={validated_data.get('bpm')} spo2={validated_data.get('spo2')} "
+            f"temp={validated_data.get('temperature')} ph={validated_data.get('ph')} "
+            f"ldr={validated_data.get('ldr')} "
+            f"mems=({validated_data.get('mems_x')},{validated_data.get('mems_y')},{validated_data.get('mems_z')})"
+        )
         reading_id = DatabaseService.save_reading(validated_data)
         preds = self.prediction_service.predict(validated_data)
         DatabaseService.save_prediction(reading_id, preds)
         await AlertService.broadcast_alert(manager, validated_data["cattle_id"], validated_data, preds)
+        logger.info(f"[SENSOR SAVED] reading_id={reading_id} overall={'abnormal' if any(v.get('status')=='abnormal' for v in preds.values()) else 'normal'}")
         return {"reading_id": reading_id, "predictions": preds}

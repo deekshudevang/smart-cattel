@@ -2,6 +2,10 @@ package com.example.smartcattle.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.smartcattle.data.api.ActivityResponse
+import com.example.smartcattle.data.api.DashboardSummaryResponse
+import com.example.smartcattle.data.api.FeedConsumptionResponse
+import com.example.smartcattle.data.api.MilkProductionResponse
 import com.example.smartcattle.data.model.AlertRow
 import com.example.smartcattle.data.model.HealthStatus
 import com.example.smartcattle.data.model.HistoryRow
@@ -23,6 +27,18 @@ class CattleViewModel(private val repository: CattleRepository) : ViewModel() {
     private val _alerts = MutableStateFlow<List<AlertRow>>(emptyList())
     val alerts: StateFlow<List<AlertRow>> = _alerts
 
+    private val _dashboardSummary = MutableStateFlow<DashboardSummaryResponse?>(null)
+    val dashboardSummary: StateFlow<DashboardSummaryResponse?> = _dashboardSummary
+
+    private val _milkProduction = MutableStateFlow<List<MilkProductionResponse>>(emptyList())
+    val milkProduction: StateFlow<List<MilkProductionResponse>> = _milkProduction
+
+    private val _feedConsumption = MutableStateFlow<List<FeedConsumptionResponse>>(emptyList())
+    val feedConsumption: StateFlow<List<FeedConsumptionResponse>> = _feedConsumption
+
+    private val _activity = MutableStateFlow<List<ActivityResponse>>(emptyList())
+    val activity: StateFlow<List<ActivityResponse>> = _activity
+
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected
 
@@ -43,11 +59,14 @@ class CattleViewModel(private val repository: CattleRepository) : ViewModel() {
             }
         }
 
-        // Pre-populate via REST so the UI isn't blank before first WS packet
+        // Do NOT pre-populate latestData or history via REST to avoid showing stale/fake dataset values.
+        // Wait strictly for physical Arduino WebSocket packets to arrive.
         viewModelScope.launch {
-            _latestData.value = repository.fetchLatest(cattleId)
-            _history.value = repository.fetchHistory(cattleId)
             _alerts.value = repository.fetchAlerts()
+            _dashboardSummary.value = repository.fetchDashboardSummary()
+            _milkProduction.value = repository.fetchMilkProduction(cattleId)
+            _feedConsumption.value = repository.fetchFeedConsumption(cattleId)
+            _activity.value = repository.fetchActivity(cattleId)
         }
     }
 
@@ -109,6 +128,19 @@ class CattleViewModel(private val repository: CattleRepository) : ViewModel() {
             }
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+    fun fetchDashboardSummary() {
+        viewModelScope.launch {
+            _dashboardSummary.value = repository.fetchDashboardSummary()
+        }
+    }
+
+    fun fetchProductivityData(cattleId: String) {
+        viewModelScope.launch {
+            _milkProduction.value = repository.fetchMilkProduction(cattleId)
+            _feedConsumption.value = repository.fetchFeedConsumption(cattleId)
+            _activity.value = repository.fetchActivity(cattleId)
         }
     }
 }

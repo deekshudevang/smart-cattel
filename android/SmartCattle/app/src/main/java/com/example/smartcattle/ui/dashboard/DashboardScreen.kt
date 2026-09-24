@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.smartcattle.data.model.SensorData
 import com.example.smartcattle.viewmodel.CattleViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.util.Locale
 
 // ── Colour tokens ──
@@ -31,8 +32,8 @@ private val Border    = Color(0xFF1E3050)
 
 @Composable
 fun DashboardScreen(viewModel: CattleViewModel) {
-    val data by viewModel.latestData.collectAsState()
-    val connected by viewModel.isConnected.collectAsState()
+    val data by viewModel.latestData.collectAsStateWithLifecycle()
+    val connected by viewModel.isConnected.collectAsStateWithLifecycle()
 
     Column(
         modifier = Modifier
@@ -49,22 +50,11 @@ fun DashboardScreen(viewModel: CattleViewModel) {
             StatusDot(connected)
         }
 
-        if (data == null) {
-            Box(modifier = Modifier.fillMaxWidth().padding(top = 40.dp), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(color = Blue)
-                    Spacer(Modifier.height(12.dp))
-                    Text("Waiting for sensor data…", color = Grey, fontSize = 13.sp)
-                }
-            }
-            return@Column
-        }
-
-        val d = data!!
+        val d = data ?: SensorData(cattleId = "CATTLE-001", timestamp = "", spo2 = null, bpm = null, temperature = null, humidity = null, memsX = null, memsY = null, memsZ = null, ph = null, ldr = null, fallDetected = false)
 
         // ── Overall health banner ──
         val overallColor by animateColorAsState(
-            if (d.health.overall == "normal") Green else Red, label = "overallColor"
+            if (data == null) Grey else if (d.health.overall == "normal") Green else Red, label = "overallColor"
         )
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -75,11 +65,11 @@ fun DashboardScreen(viewModel: CattleViewModel) {
                 modifier = Modifier.padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(if (d.health.overall == "normal") "✅" else "⚠️", fontSize = 28.sp)
+                Text(if (data == null) "⏳" else if (d.health.overall == "normal") "✅" else "⚠️", fontSize = 28.sp)
                 Spacer(Modifier.width(12.dp))
                 Column {
                     Text(d.cattleId, color = Grey, fontSize = 12.sp)
-                    Text(d.overallStatus, color = overallColor, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Text(if (data == null) "Waiting for Arduino" else d.overallStatus, color = overallColor, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 }
                 Spacer(Modifier.weight(1f))
                 if (d.fallDetected) {
@@ -91,34 +81,34 @@ fun DashboardScreen(viewModel: CattleViewModel) {
         // ── Sensor cards grid ──
         Text("Live Sensors", color = Grey, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
 
-        val spo2Val = if (!connected) "--" else if (d.spo2 == null || d.spo2 == 0) "Place Finger" else "${d.spo2}"
+        val spo2Val = if (!connected || d.spo2 == null) "--" else if (d.spo2 == 0) "Place Finger" else "${d.spo2}"
         val spo2Unit = if (!connected || d.spo2 == null || d.spo2 == 0) "" else "%"
-        val spo2Status = if (!connected) "unknown" else d.health.spo2
+        val spo2Status = if (!connected || data == null) "unknown" else d.health.spo2
         SensorCard("💓", "SpO2", spo2Val, spo2Unit, spo2Status)
 
-        val bpmVal = if (!connected) "--" else if (d.bpm == null || d.bpm == 0) "Place Finger" else "${d.bpm}"
+        val bpmVal = if (!connected || d.bpm == null) "--" else if (d.bpm == 0) "Place Finger" else "${d.bpm}"
         val bpmUnit = if (!connected || d.bpm == null || d.bpm == 0) "" else "bpm"
-        val bpmStatus = if (!connected) "unknown" else d.health.bpm
+        val bpmStatus = if (!connected || data == null) "unknown" else d.health.bpm
         SensorCard("❤️", "Heart Rate", bpmVal, bpmUnit, bpmStatus)
         
         val tempVal = if (!connected || d.temperature == null) "--" else String.format(Locale.US, "%.1f", d.temperature)
-        val tempStatus = if (!connected) "unknown" else d.health.temperature
+        val tempStatus = if (!connected || data == null) "unknown" else d.health.temperature
         SensorCard("🌡️", "Body Temp",  tempVal, if (!connected || d.temperature == null) "" else "°C",  tempStatus)
         
         val humVal = if (!connected || d.humidity == null) "--" else String.format(Locale.US, "%.0f", d.humidity)
-        SensorCard("💧", "Humidity",   humVal,    if (!connected || d.humidity == null) "" else "%",   if (!connected) "unknown" else "normal")
+        SensorCard("💧", "Humidity",   humVal,    if (!connected || d.humidity == null) "" else "%",   if (!connected || data == null) "unknown" else "normal")
         
         val phVal = if (!connected || d.ph == null) "--" else String.format(Locale.US, "%.1f", d.ph)
-        val phStatus = if (!connected) "unknown" else d.health.ph
+        val phStatus = if (!connected || data == null) "unknown" else d.health.ph
         SensorCard("🧪", "pH Level",   phVal,          "",    phStatus)
         
         val ldrVal = if (!connected || d.ldr == null) "--" else "${d.ldr}"
-        val ldrStatus = if (!connected) "unknown" else d.health.ldr
+        val ldrStatus = if (!connected || data == null) "unknown" else d.health.ldr
         SensorCard("☀️", "Light",      ldrVal,                                if (!connected || d.ldr == null) "" else "lux", ldrStatus)
         
         val memsVal = if (!connected || d.memsX == null || d.memsY == null || d.memsZ == null) "--" else String.format(Locale.US, "X:%.2f Y:%.2f Z:%.2f", d.memsX, d.memsY, d.memsZ)
-        val memsStatus = if (!connected) "unknown" else if (d.fallDetected) "abnormal" else d.health.mems
-        val memsBadge = if (connected && d.fallDetected) "FALL DETECTED" else null
+        val memsStatus = if (!connected || data == null) "unknown" else if (d.fallDetected) "abnormal" else d.health.mems
+        val memsBadge = if (connected && data != null && d.fallDetected) "FALL DETECTED" else null
         SensorCard(
             icon   = "🏃",
             label  = "Motion / Fall",
