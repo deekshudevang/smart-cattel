@@ -141,3 +141,10 @@ python ml/training/train.py
 
 ## 📜 License
 Distributed under the MIT License. See `LICENSE` for more information.
+
+## 📊 Code Audit & System Mismatches
+During a recent comprehensive architecture audit:
+- The system correctly maps `bpm` (from Arduino) to `heart_rate` in the backend.
+- Invalid or missing sensor data is passed securely as `null` through the WebSocket and preserved without fallback padding.
+- API structure remains strictly separated: `/api/cattle/...` for REST fetching and `/ws/cattle/...` for high-frequency updates.
+- Real hardware components are strictly verified avoiding mock sensors for critical telemetry.
