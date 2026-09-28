@@ -135,8 +135,8 @@ private fun rowCells(r: HistoryRow): List<String> {
         ts,
         r.spo2.toString(),
         r.heart_rate.toString(),
-        String.format(Locale.US, "%.1f", r.temperature),
-        String.format(Locale.US, "%.0f", r.humidity),
+        r.temperature?.let { if (it == 0f) "Not Available" else String.format(Locale.US, "%.1f", it) } ?: "Not Available",
+        r.humidity?.let { if (it == 0f) "Not Available" else String.format(Locale.US, "%.0f", it) } ?: "Not Available",
         String.format(Locale.US, "%.1f", r.ph),
         if (r.fallDetected) "🚨" else "—",
         if (r.health.overall == "normal") "✓" else "⚠"

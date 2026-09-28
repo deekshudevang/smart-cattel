@@ -12,7 +12,8 @@ class FallDetector:
                 "activity_state": "unknown",
                 "activity_score": 0.0,
                 "fall_detected": False,
-                "fall_confidence": 0.0
+                "fall_confidence": 0.0,
+                "peak_acceleration": 0.0
             }
             
         # 1. Acceleration magnitude
@@ -27,19 +28,22 @@ class FallDetector:
             "x": x, "y": y, "z": z
         })
         
-        # Keep last 60 readings (approx 90 seconds)
-        if len(self.history[device_id]) > 60:
+        # Keep last 100 readings
+        if len(self.history[device_id]) > 100:
             self.history[device_id].pop(0)
             
+        history = self.history[device_id]
+        
         # 2. Activity Level & Movement Detection
-        recent = self.history[device_id][-10:]
+        recent = history[-10:]
         if len(recent) < 2:
             return {
                 "acceleration_magnitude": mag,
-                "activity_state": "idle",
+                "activity_state": "normal activity",
                 "activity_score": 0.0,
                 "fall_detected": False,
-                "fall_confidence": 0.0
+                "fall_confidence": 0.0,
+                "peak_acceleration": mag
             }
             
         mags = [r["mag"] for r in recent]
@@ -47,56 +51,63 @@ class FallDetector:
         variance = sum((m - avg_mag)**2 for m in mags) / len(mags)
         
         activity_score = min(10.0, variance * 10)
+        peak_accel = max(mags)
         
-        if activity_score < 0.5:
-            activity_state = "idle"
-        elif activity_score < 3.0:
-            activity_state = "walking"
+        if activity_score < 0.2:
+            activity_state = "low activity"
+        elif activity_score < 2.5:
+            activity_state = "normal activity"
         else:
-            activity_state = "active"
+            activity_state = "high activity"
             
-        # 3. Sudden acceleration, 4. Orientation change, 5. Fall candidate, 6. Post-fall inactivity
+        # 3. Fall sequence detection
+        # Need at least 30 samples to detect a full sequence (pre-impact, impact, post-impact)
         fall_detected = False
         fall_confidence = 0.0
         
-        history = self.history[device_id]
-        if len(history) >= 20:
-            # Look for impact in the recent window
+        if len(history) >= 30:
+            # Detect impact (sudden acceleration)
+            # Find the peak in the middle window to allow for pre and post analysis
+            middle_window = history[-25:-5]
+            
             impact_idx = -1
-            for i, r in enumerate(history[-20:]):
-                # Standard gravity is ~1g, sudden acceleration > 2.5g could be an impact
-                if r["mag"] > 2.5:
-                    impact_idx = i
-                    break
+            impact_mag = 0
+            for i, r in enumerate(middle_window):
+                if r["mag"] > 2.5 and r["mag"] > impact_mag:
+                    impact_idx = len(history) - 25 + i
+                    impact_mag = r["mag"]
                     
-            if impact_idx != -1 and impact_idx < 15:
-                # Post-fall inactivity check
-                post_impact = history[-20:][impact_idx+1:]
-                if len(post_impact) >= 5:
+            if impact_idx != -1:
+                peak_accel = max(peak_accel, impact_mag)
+                
+                # Check pre-impact (normal/high activity)
+                pre_impact = history[max(0, impact_idx-10):impact_idx]
+                
+                # Check post-impact inactivity
+                post_impact = history[impact_idx+1:impact_idx+6]
+                
+                if len(pre_impact) >= 2 and len(post_impact) >= 5:
                     post_mags = [r["mag"] for r in post_impact]
                     post_avg = sum(post_mags) / len(post_mags)
                     post_var = sum((m - post_avg)**2 for m in post_mags) / len(post_mags)
                     
-                    if post_var < 0.1: # Very still after fall
+                    if post_var < 0.15: # post-impact inactivity
                         # Orientation change check
-                        pre_impact = history[-20:][:impact_idx]
-                        if len(pre_impact) > 0:
-                            avg_z_pre = sum(r["z"] for r in pre_impact) / len(pre_impact)
-                            avg_z_post = sum(r["z"] for r in post_impact) / len(post_impact)
-                            
-                            # If orientation changed significantly (e.g. from upright to side)
-                            z_diff = abs(avg_z_pre - avg_z_post)
-                            if z_diff > 0.5:
-                                fall_detected = True
-                                # 7. Confidence score
-                                fall_confidence = min(1.0, 0.5 + (z_diff * 0.2) + (0.1 / (post_var + 0.01)))
+                        avg_z_pre = sum(r["z"] for r in pre_impact) / len(pre_impact)
+                        avg_z_post = sum(r["z"] for r in post_impact) / len(post_impact)
+                        
+                        z_diff = abs(avg_z_pre - avg_z_post)
+                        if z_diff > 0.4: # orientation change
+                            fall_detected = True
+                            fall_confidence = min(1.0, 0.4 + (z_diff * 0.2) + (impact_mag * 0.1) + (0.1 / (post_var + 0.01)))
 
         return {
             "acceleration_magnitude": mag,
             "activity_state": activity_state,
             "activity_score": round(activity_score, 2),
             "fall_detected": fall_detected,
-            "fall_confidence": round(fall_confidence, 2)
+            "fall_confidence": round(fall_confidence, 2),
+            "peak_acceleration": round(peak_accel, 2)
         }
 
 fall_detector = FallDetector()

@@ -81,33 +81,34 @@ fun DashboardScreen(viewModel: CattleViewModel) {
         // ── Sensor cards grid ──
         Text("Live Sensors", color = Grey, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
 
-        val spo2Val = if (!connected || d.spo2 == null) "--" else if (d.spo2 == 0) "Place Finger" else "${d.spo2}"
+        val spo2Val = if (!connected) "Offline" else if (d.spo2 == null) "Not Available" else "${d.spo2}"
         val spo2Unit = if (!connected || d.spo2 == null || d.spo2 == 0) "" else "%"
-        val spo2Status = if (!connected || data == null) "unknown" else d.health.spo2
+        val spo2Status = if (!connected) "OFFLINE" else if (data == null) "STALE" else if (d.spo2 == null) "NULL" else if (d.health.spo2 == "abnormal") "INVALID" else "VALID"
         SensorCard("💓", "SpO2", spo2Val, spo2Unit, spo2Status)
 
-        val heartRateVal = if (!connected || d.heart_rate == null) "--" else if (d.heart_rate == 0) "Place Finger" else "${d.heart_rate}"
-        val heartRateUnit = if (!connected || d.heart_rate == null || d.heart_rate == 0) "" else "heart_rate"
-        val heartRateStatus = if (!connected || data == null) "unknown" else d.health.heart_rate
+        val heartRateVal = if (!connected) "Offline" else if (d.heart_rate == null) "Not Available" else "${d.heart_rate}"
+        val heartRateUnit = if (!connected || d.heart_rate == null || d.heart_rate == 0) "" else "bpm"
+        val heartRateStatus = if (!connected) "OFFLINE" else if (data == null) "STALE" else if (d.heart_rate == null) "NULL" else if (d.health.heart_rate == "abnormal") "INVALID" else "VALID"
         SensorCard("❤️", "Heart Rate", heartRateVal, heartRateUnit, heartRateStatus)
         
-        val tempVal = if (!connected || d.temperature == null) "--" else String.format(Locale.US, "%.1f", d.temperature)
-        val tempStatus = if (!connected || data == null) "unknown" else d.health.temperature
+        val tempVal = if (!connected) "Offline" else if (d.temperature == null) "Not Available" else String.format(Locale.US, "%.1f", d.temperature)
+        val tempStatus = if (!connected) "OFFLINE" else if (data == null) "STALE" else if (d.temperature == null) "NULL" else if (d.health.temperature == "abnormal") "INVALID" else "VALID"
         SensorCard("🌡️", "Body Temp",  tempVal, if (!connected || d.temperature == null) "" else "°C",  tempStatus)
         
-        val humVal = if (!connected || d.humidity == null) "--" else String.format(Locale.US, "%.0f", d.humidity)
-        SensorCard("💧", "Humidity",   humVal,    if (!connected || d.humidity == null) "" else "%",   if (!connected || data == null) "unknown" else "normal")
+        val humVal = if (!connected) "Offline" else if (d.humidity == null) "Not Available" else String.format(Locale.US, "%.0f", d.humidity)
+        val humStatus = if (!connected) "OFFLINE" else if (data == null) "STALE" else if (d.humidity == null) "NULL" else "VALID"
+        SensorCard("💧", "Humidity",   humVal,    if (!connected || d.humidity == null) "" else "%",   humStatus)
         
-        val phVal = if (!connected || d.ph == null) "--" else String.format(Locale.US, "%.1f", d.ph)
-        val phStatus = if (!connected || data == null) "unknown" else d.health.ph
+        val phVal = if (!connected) "Offline" else if (d.ph == null) "Not Available" else String.format(Locale.US, "%.1f", d.ph)
+        val phStatus = if (!connected) "OFFLINE" else if (data == null) "STALE" else if (d.ph == null) "NULL" else if (d.health.ph == "abnormal") "INVALID" else "VALID"
         SensorCard("🧪", "pH Level",   phVal,          "",    phStatus)
         
-        val ldrVal = if (!connected || d.ldr == null) "--" else "${d.ldr}"
-        val ldrStatus = if (!connected || data == null) "unknown" else d.health.ldr
+        val ldrVal = if (!connected) "Offline" else if (d.ldr == null) "Not Available" else "${d.ldr}"
+        val ldrStatus = if (!connected) "OFFLINE" else if (data == null) "STALE" else if (d.ldr == null) "NULL" else if (d.health.ldr == "abnormal") "INVALID" else "VALID"
         SensorCard("☀️", "Light",      ldrVal,                                if (!connected || d.ldr == null) "" else "lux", ldrStatus)
         
-        val memsVal = if (!connected || d.memsX == null || d.memsY == null || d.memsZ == null) "--" else String.format(Locale.US, "X:%.2f Y:%.2f Z:%.2f", d.memsX, d.memsY, d.memsZ)
-        val memsStatus = if (!connected || data == null) "unknown" else if (d.fallDetected) "abnormal" else d.health.mems
+        val memsVal = if (!connected) "Offline" else if (d.memsX == null || d.memsY == null || d.memsZ == null) "Not Available" else String.format(Locale.US, "X:%.2f Y:%.2f Z:%.2f", d.memsX, d.memsY, d.memsZ)
+        val memsStatus = if (!connected) "OFFLINE" else if (data == null) "STALE" else if (d.memsX == null) "NULL" else if (d.fallDetected) "INVALID" else "VALID"
         val memsBadge = if (connected && data != null && d.fallDetected) "FALL DETECTED" else null
         SensorCard(
             icon   = "🏃",
@@ -128,8 +129,10 @@ fun DashboardScreen(viewModel: CattleViewModel) {
 @Composable
 private fun SensorCard(icon: String, label: String, value: String, unit: String, status: String, badge: String? = null) {
     val statusColor = when (status) {
-        "normal"   -> Green
-        "abnormal" -> Red
+        "VALID", "normal"   -> Green
+        "INVALID", "abnormal" -> Red
+        "STALE", "NULL" -> Orange
+        "OFFLINE" -> Grey
         else       -> Orange
     }
     Card(

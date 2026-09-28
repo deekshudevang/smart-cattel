@@ -5,7 +5,7 @@ import numpy as np
 import json
 import datetime
 import joblib
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.multioutput import MultiOutputClassifier
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
@@ -19,7 +19,8 @@ class CattleMLPipeline:
         self.features = [
             "spo2", "heart_rate", "temperature", "humidity",
             "mems_x", "mems_y", "mems_z", "acceleration_magnitude",
-            "ph", "ldr", "activity"
+            "ph", "ldr", "activity", "temp_baseline_dev",
+            "hr_baseline_dev", "spo2_baseline_dev", "activity_baseline_dev"
         ]
         self.labels = ["overall_status"]
         self.version = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
@@ -31,43 +32,20 @@ class CattleMLPipeline:
                 conn = sqlite3.connect(self.db_path)
                 query = """
                     SELECT r.*, p.spo2_status, p.heart_rate_status, p.temperature_status, 
-                           p.mems_status, p.ph_status, p.ldr_status, p.overall_status
+                           p.mems_status, p.ph_status, p.ldr_status, p.overall_status,
+                           d.cattle_id
                     FROM sensor_readings r
                     JOIN predictions p ON r.id = p.reading_id
+                    LEFT JOIN devices d ON r.device_id = d.device_id
                 """
                 df = pd.read_sql_query(query, conn)
+                df = df.loc[:,~df.columns.duplicated()]
                 conn.close()
                 return df
             except Exception as e:
                 print(f"Failed to load from DB: {e}")
         
-        print("No valid DB found, generating synthetic dataset for pipeline validation...")
-        return self._generate_synthetic_data()
-
-    def _generate_synthetic_data(self):
-        np.random.seed(42)
-        n = 1000
-        df = pd.DataFrame({
-            "spo2": np.random.normal(98, 2, n),
-            "heart_rate": np.random.normal(70, 10, n),
-            "temperature": np.random.normal(38.5, 0.5, n),
-            "humidity": np.random.normal(50, 10, n),
-            "mems_x": np.random.normal(0, 0.5, n),
-            "mems_y": np.random.normal(0, 0.5, n),
-            "mems_z": np.random.normal(9.81, 0.5, n),
-            "ph": np.random.normal(6.5, 0.3, n),
-            "ldr": np.random.normal(500, 100, n),
-            "spo2_status": np.random.choice(["normal", "abnormal"], n, p=[0.9, 0.1]),
-            "heart_rate_status": np.random.choice(["normal", "abnormal"], n, p=[0.9, 0.1]),
-            "temperature_status": np.random.choice(["normal", "abnormal"], n, p=[0.9, 0.1]),
-            "mems_status": np.random.choice(["normal", "abnormal"], n, p=[0.9, 0.1]),
-            "ph_status": np.random.choice(["normal", "abnormal"], n, p=[0.9, 0.1]),
-            "ldr_status": np.random.choice(["normal", "abnormal"], n, p=[0.9, 0.1]),
-            "overall_status": np.random.choice(["normal", "abnormal"], n, p=[0.8, 0.2])
-        })
-        # Introduce some missing values
-        df.loc[np.random.choice(n, 50), "spo2"] = np.nan
-        return df
+        raise FileNotFoundError("No valid DB found. Synthetic dataset generation is disabled.")
 
     def data_cleaning(self, df):
         """2. Cleaning"""
@@ -93,10 +71,20 @@ class CattleMLPipeline:
         if "acceleration_magnitude" not in df.columns:
             df["acceleration_magnitude"] = np.sqrt(df["mems_x"]**2 + df["mems_y"]**2 + df["mems_z"]**2)
         
-        # Calculate activity score (mock logic based on magnitude)
+        # Calculate activity score based on magnitude
         if "activity" not in df.columns:
             df["activity"] = (df["acceleration_magnitude"] - 9.81).abs()
         
+        # Baseline deviations (placeholder logic - in real world would use baseline engine output)
+        if "temp_baseline_dev" not in df.columns:
+            df["temp_baseline_dev"] = 0.0
+        if "hr_baseline_dev" not in df.columns:
+            df["hr_baseline_dev"] = 0.0
+        if "spo2_baseline_dev" not in df.columns:
+            df["spo2_baseline_dev"] = 0.0
+        if "activity_baseline_dev" not in df.columns:
+            df["activity_baseline_dev"] = 0.0
+
         # Ensure all expected features exist
         for f in self.features:
             if f not in df.columns:
@@ -109,12 +97,33 @@ class CattleMLPipeline:
         return df
 
     def split_data(self, df):
-        """5. Train/Validation/Test Split"""
+        """5. Train/Validation/Test Split with Grouping"""
+        if "cattle_id" not in df.columns or df["cattle_id"].isnull().all():
+            df["cattle_id"] = np.random.randint(0, 10, size=len(df))
+        df["cattle_id"] = df["cattle_id"].fillna("unknown_cattle")
+            
         X = df[self.features]
         Y = df[self.labels]
-        # 70/15/15
-        X_temp, X_test, Y_temp, Y_test = train_test_split(X, Y, test_size=0.15, random_state=42)
-        X_train, X_val, Y_train, Y_val = train_test_split(X_temp, Y_temp, test_size=0.1765, random_state=42) # 0.1765 of 0.85 approx 0.15
+        groups = df["cattle_id"]
+        
+        # Fallback if we don't have enough groups
+        if len(groups.unique()) < 3:
+            X_temp, X_test, Y_temp, Y_test = train_test_split(X, Y, test_size=0.15, random_state=42)
+            X_train, X_val, Y_train, Y_val = train_test_split(X_temp, Y_temp, test_size=0.1765, random_state=42)
+            return X_train, X_val, X_test, Y_train, Y_val, Y_test
+            
+        gss = GroupShuffleSplit(n_splits=1, test_size=0.3, random_state=42)
+        train_idx, temp_idx = next(gss.split(X, Y, groups))
+        
+        X_train, Y_train = X.iloc[train_idx], Y.iloc[train_idx]
+        X_temp, Y_temp, groups_temp = X.iloc[temp_idx], Y.iloc[temp_idx], groups.iloc[temp_idx]
+        
+        gss_val = GroupShuffleSplit(n_splits=1, test_size=0.5, random_state=42)
+        val_idx, test_idx = next(gss_val.split(X_temp, Y_temp, groups_temp))
+        
+        X_val, Y_val = X_temp.iloc[val_idx], Y_temp.iloc[val_idx]
+        X_test, Y_test = X_temp.iloc[test_idx], Y_temp.iloc[test_idx]
+        
         return X_train, X_val, X_test, Y_train, Y_val, Y_test
 
     def train_model(self, X_train, Y_train):
@@ -164,13 +173,24 @@ class CattleMLPipeline:
         metadata = {
             "version": self.version,
             "timestamp": datetime.datetime.now().isoformat(),
-            "features": self.features,
-            "labels": self.labels,
-            "metrics": metrics
+            "model_type": "RandomForestClassifier",
+            "labels": self.labels
         }
         meta_path = os.path.join(self.model_dir, "metadata.json")
         with open(meta_path, "w") as f:
             json.dump(metadata, f, indent=4)
+            
+        feature_schema = {
+            "features": self.features,
+            "version": self.version
+        }
+        schema_path = os.path.join(self.model_dir, "feature_schema.json")
+        with open(schema_path, "w") as f:
+            json.dump(feature_schema, f, indent=4)
+            
+        metrics_path = os.path.join(self.model_dir, "metrics.json")
+        with open(metrics_path, "w") as f:
+            json.dump({"version": self.version, "metrics": metrics}, f, indent=4)
         
         print(f"Model saved to {model_path}")
         print(f"Metadata saved to {meta_path}")

@@ -4,19 +4,19 @@ from typing import List
 class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DATABASE_URL: str = "sqlite:///./smart_cattle.db"
-    SERIAL_PORT: str = "COM6"
+    SERIAL_PORT: str
     SERIAL_BAUDRATE: int = 9600
-    HARDWARE_MODE: str = "arduino"
-    ALLOW_SIMULATION: bool = True
-    JWT_SECRET: str = "fallback_secret_key"
-    SMS_PHONE_NUMBER: str = "+1234567890"
+    HARDWARE_MODE: str = "real"
+    ALLOW_SIMULATION: bool = False
+    JWT_SECRET: str
+    SMS_PHONE_NUMBER: str
     CORS_ORIGINS: str = "*"
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    ADMIN_USERNAME: str = "admin"
-    ADMIN_PASSWORD: str = "admin"
+    ADMIN_USERNAME: str
+    ADMIN_PASSWORD: str
     
     @property
     def cors_origins_list(self) -> List[str]:

@@ -19,10 +19,18 @@ class Device(Base, BaseMixin):
     __tablename__ = "devices"
     id = Column(Integer, primary_key=True, index=True)
     device_id = Column(String, unique=True, index=True)
+    serial_number = Column(String, unique=True, nullable=True)
+    firmware_version = Column(String, nullable=True)
+    hardware_revision = Column(String, nullable=True)
+    installation_date = Column(DateTime, nullable=True)
+    battery_level = Column(Float, nullable=True)
+    last_maintenance = Column(DateTime, nullable=True)
+    notes = Column(String, nullable=True)
     cattle_id = Column(String, ForeignKey("cattle.cattle_id"), nullable=True)
     status = Column(String, default="active")
     
     cattle = relationship("Cattle", back_populates="devices")
+    assignments = relationship("DeviceAssignment", back_populates="device")
 
 class Cattle(Base, BaseMixin):
     __tablename__ = "cattle"
@@ -51,6 +59,7 @@ class Cattle(Base, BaseMixin):
     medical_records = relationship("MedicalRecord", back_populates="cattle")
     vaccinations = relationship("Vaccination", back_populates="cattle")
     health_assessments = relationship("HealthAssessment", back_populates="cattle")
+    device_assignments = relationship("DeviceAssignment", back_populates="cattle")
 
 class SensorReading(Base, BaseMixin):
     __tablename__ = "sensor_readings"
@@ -72,9 +81,17 @@ class SensorReading(Base, BaseMixin):
     activity_score = Column(Float, nullable=True)
     fall_detected = Column(Boolean, default=False)
     fall_confidence = Column(Float, nullable=True)
+    peak_acceleration = Column(Float, nullable=True)
     
     ph = Column(Float)
     ldr = Column(Integer)
+    
+    # GPS and GSM
+    gps_valid = Column(Boolean, default=False)
+    gps_lat = Column(Float, nullable=True)
+    gps_lon = Column(Float, nullable=True)
+    gps_satellites = Column(Integer, nullable=True)
+    gsm_status = Column(String, nullable=True)
     
     cattle = relationship("Cattle", back_populates="sensor_readings")
     prediction = relationship("Prediction", back_populates="reading", uselist=False)
@@ -195,7 +212,13 @@ class SensorCalibration(Base, BaseMixin):
     device_id = Column(String, ForeignKey("devices.device_id"), index=True)
     sensor_type = Column(String)
     calibration_date = Column(DateTime, default=datetime.utcnow)
-    calibration_data = Column(String)
+    buffer_1 = Column(Float, nullable=True)
+    buffer_1_voltage = Column(Float, nullable=True)
+    buffer_2 = Column(Float, nullable=True)
+    buffer_2_voltage = Column(Float, nullable=True)
+    slope = Column(Float, nullable=True)
+    intercept = Column(Float, nullable=True)
+    calibration_data = Column(String, nullable=True) # Retained for backward compatibility or other sensors
     performed_by = Column(String, nullable=True)
 
 class DeviceEvent(Base, BaseMixin):
@@ -205,3 +228,41 @@ class DeviceEvent(Base, BaseMixin):
     event_type = Column(String, index=True)
     event_data = Column(String)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+
+class FallEvent(Base, BaseMixin):
+    __tablename__ = "fall_events"
+    id = Column(Integer, primary_key=True, index=True)
+    cattle_id = Column(String, ForeignKey("cattle.cattle_id"), index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    peak_acceleration = Column(Float)
+    activity_score = Column(Float)
+    fall_confidence = Column(Float)
+    
+    cattle = relationship("Cattle")
+
+class DeviceAssignment(Base, BaseMixin):
+    __tablename__ = "device_assignments"
+    id = Column(Integer, primary_key=True, index=True)
+    device_id = Column(String, ForeignKey("devices.device_id"), index=True)
+    cattle_id = Column(String, ForeignKey("cattle.cattle_id"), index=True)
+    assigned_at = Column(DateTime, default=datetime.utcnow, index=True)
+    removed_at = Column(DateTime, nullable=True, index=True)
+    status = Column(String, default="active", index=True)
+    
+    device = relationship("Device", back_populates="assignments")
+    cattle = relationship("Cattle", back_populates="device_assignments")
+
+
+class SmsLog(Base, BaseMixin):
+    __tablename__ = "sms_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    cattle_id = Column(String, ForeignKey("cattle.cattle_id"), index=True)
+    alert_type = Column(String, index=True)
+    severity = Column(String)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    location = Column(String, nullable=True)
+    status = Column(String, index=True) # attempted, sent, failed
+    reason = Column(String, nullable=True)
+    
+    cattle = relationship("Cattle")
+

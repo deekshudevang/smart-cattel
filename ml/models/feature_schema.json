@@ -1,0 +1,20 @@
+{
+    "features": [
+        "spo2",
+        "heart_rate",
+        "temperature",
+        "humidity",
+        "mems_x",
+        "mems_y",
+        "mems_z",
+        "acceleration_magnitude",
+        "ph",
+        "ldr",
+        "activity",
+        "temp_baseline_dev",
+        "hr_baseline_dev",
+        "spo2_baseline_dev",
+        "activity_baseline_dev"
+    ],
+    "version": "20260928223703"
+}

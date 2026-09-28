@@ -23,7 +23,7 @@ from websocket.manager import manager
 from config import settings
 from services import SensorService, PredictionService
 from auth import get_current_user, require_admin
-from routers import analytics
+from routers import analytics, calibration, cattle, devices
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -41,6 +41,9 @@ app = FastAPI(title="Smart Cattle Health Monitoring API")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.include_router(analytics.router)
+app.include_router(calibration.router)
+app.include_router(cattle.router)
+app.include_router(devices.router)
 
 # CORS
 app.add_middleware(
@@ -142,6 +145,39 @@ async def _offline_monitor():
 
 _main_loop: asyncio.AbstractEventLoop = None
 
+async def _simulator_loop():
+    logger.info("Starting simulator loop...")
+    while True:
+        try:
+            await asyncio.sleep(5)
+            # Pick a random cattle ID
+            with database.SessionLocal() as db:
+                cattle_list = db.query(models.Cattle).filter(models.Cattle.deleted == False).all()
+                if not cattle_list:
+                    continue
+                cattle_ids = [c.cattle_id for c in cattle_list]
+                
+            cid = random.choice(cattle_ids)
+            data = {
+                "cattle_id": cid,
+                "temperature": round(random.uniform(37.5, 39.5), 2),
+                "heart_rate": random.randint(48, 84),
+                "spo2": random.randint(95, 100),
+                "mems_x": round(random.uniform(-1, 1), 2),
+                "mems_y": round(random.uniform(-1, 1), 2),
+                "mems_z": round(random.uniform(9, 10), 2),
+                "ph": round(random.uniform(6.5, 7.5), 2),
+                "ldr": random.randint(100, 1000)
+            }
+            # process reading
+            await sensor_service.process_reading(data, manager)
+            logger.info(f"[SIMULATOR] Sent data for {cid}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Simulator error: {e}")
+
+
 def handle_arduino_data(data: dict):
     global last_arduino_time, _main_loop
     last_arduino_time = time.time()
@@ -181,13 +217,14 @@ def _try_arduino():
         serial_reader.start(callback=handle_arduino_data)
         return True
     except Exception as e:
-        logger.warning(f"Arduino not available ({e}). Using simulator.")
+        logger.warning(f"Arduino not available ({e}).")
         return False
 
 @app.on_event("startup")
 async def startup_event():
     global _main_loop
     _main_loop = asyncio.get_event_loop()  # capture FastAPI's loop for thread-safe scheduling
+    asyncio.create_task(manager.ping_clients())
 
 
 
@@ -203,14 +240,24 @@ async def startup_event():
 
     asyncio.create_task(_offline_monitor())
 
-    if _try_arduino():
-        logger.info("=" * 50)
-        logger.info(f"ARDUINO MODE: Reading real sensor data from {settings.SERIAL_PORT}")
-        logger.info("=" * 50)
+    if settings.HARDWARE_MODE == "real":
+        if _try_arduino():
+            logger.info("=" * 50)
+            logger.info(f"ARDUINO MODE: Reading real sensor data from {settings.SERIAL_PORT}")
+            logger.info("=" * 50)
+        else:
+            logger.error("ARDUINO_CONNECTION_FAILED")
+            # Do not start simulator in real mode
+    elif settings.HARDWARE_MODE == "simulation":
+        if settings.ALLOW_SIMULATION:
+            logger.info("=" * 50)
+            logger.info("SIMULATOR MODE: Generating mock sensor data")
+            logger.info("=" * 50)
+            asyncio.create_task(_simulator_loop())
+        else:
+            logger.warning("Simulation requested but ALLOW_SIMULATION is false.")
     else:
-        logger.info("=" * 50)
-        logger.warning("ARDUINO NOT DETECTED: Running in offline mode")
-        logger.info("=" * 50)
+        logger.warning(f"Unknown HARDWARE_MODE: {settings.HARDWARE_MODE}")
 
 
 @app.on_event("shutdown")
@@ -226,14 +273,25 @@ def health_check(request: Request):
 @app.get("/api/arduino/status")
 def get_arduino_status():
     global serial_reader
+    mode = settings.HARDWARE_MODE
+    sim_enabled = settings.ALLOW_SIMULATION
     if serial_reader:
-        return serial_reader.get_status()
+        status = serial_reader.get_status()
+        return {
+            "mode": mode,
+            "connected": status["connected"],
+            "port": status["port"],
+            "device": status.get("device"),
+            "last_data": status["last_packet"],
+            "simulation_enabled": sim_enabled
+        }
     return {
+        "mode": mode,
         "connected": False,
         "port": None,
-        "baudRate": settings.SERIAL_BAUDRATE,
-        "lastDataReceived": None,
-        "status": "disconnected"
+        "device": None,
+        "last_data": None,
+        "simulation_enabled": sim_enabled
     }
 
 
@@ -727,14 +785,20 @@ def get_activity(cattle_id: str, limit: int = 30, db: Session = Depends(get_db))
 def get_history_comparison(cattle_id: str, parameter: str, days: int = 7, db: Session = Depends(get_db)):
     return {"message": "Historical comparison for " + parameter, "data": []}
 
-@app.websocket("/ws/cattle/{cattle_id}")
-async def websocket_endpoint(websocket: WebSocket, cattle_id: str):
-    await manager.connect(websocket)
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket, client_id: str = Query(...), reconnect: bool = Query(False)):
+    await manager.connect(websocket, client_id, reconnect)
     try:
         while True:
-            await websocket.receive_text()
+            data = await websocket.receive_text()
+            if data == "pong" or "pong" in data:
+                if client_id in manager.active_connections:
+                    manager.active_connections[client_id].update_last_seen()
+            elif data.startswith("subscribe:"):
+                cattle_id = data.split(":")[1]
+                manager.subscribe(client_id, cattle_id)
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        manager.disconnect(client_id)
 
 if __name__ == "__main__":
     import uvicorn

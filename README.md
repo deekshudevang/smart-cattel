@@ -10,8 +10,10 @@ Traditional cattle monitoring relies on manual observation, which is labor-inten
 ## ✨ Features
 - **Real-time IoT Telemetry:** Live transmission of SpO2, BPM, temperature, pH, LDR, and 3-axis accelerometer data.
 - **Machine Learning Inference:** A deployed Scikit-Learn Random Forest pipeline predicts health risks instantly.
-- **Explainable AI:** Contextual alerts detailing exactly *why* a reading was flagged (e.g., "Abnormal BPM").
-- **Jetpack Compose Android Client:** A sleek, modern app featuring WebSocket integration for live data and historical charts.
+- **Baseline & Analytics Engine:** Individual historical baselines for each cow across multiple time windows (1h, 6h, 24h, 7d) for personalized deviation tracking.
+- **Health Risk Assessment:** Dedicated service combining sensor validity, ML output, and baseline deviations to generate explainable risk scores (NORMAL, WATCH, WARNING, CRITICAL).
+- **Alert Management:** Robust alert deduplication, cooldowns, and severity tracking (INFO, WARNING, CRITICAL) for ongoing conditions.
+- **Jetpack Compose Android Client:** A sleek, modern app featuring WebSocket integration with automatic reconnection, live data, semantic sensor states (VALID, STALE, OFFLINE), and historical charts.
 - **Bi-directional Communication:** Backend pushes updates to Android while simultaneously sending hardware trigger alerts back to the Arduino (for local LCD/SMS feedback).
 
 ## 🏗️ System Architecture
@@ -54,6 +56,9 @@ graph TD
 | **GPS NEO-6M**  | **Serial1** (RX 19, TX 18)| Geolocation telemetry (Updated) |
 | **GSM SIM900A** | **Serial2** (RX 17, TX 16)| SMS emergency alerts (Updated) |
 | **LCD 16x2**    | D30, 32, 34, 36, 38, 40 | Local hardware status display |
+
+> **⚠️ MAX30102 Limitations for Veterinary Use:**
+> The MAX30102 (and MAX30105) is designed for human fingertips with thin, relatively translucent skin. When used on cattle, the sensor faces significant challenges: thick hide, dark pigmentation, and dense hair can severely attenuate the optical signal, leading to weak or completely obstructed IR and Red light reflection. Consequently, readings are heavily dependent on sensor placement (e.g., shaved areas, ear, or under the tail) and consistent contact pressure. **Do not claim medical accuracy.** This system is strictly for experimental/observational monitoring and should not replace professional veterinary diagnostics.
 
 ## 🧠 Machine Learning Methodology
 

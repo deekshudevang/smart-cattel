@@ -9,6 +9,8 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "ml", "inference"))
 from predictor import HealthPredictor
 from fall_detection import fall_detector
 from engine import HealthRiskEngine
+from baseline_engine import BaselineEngine
+from alert_engine import AlertService as EngineAlertService, AlertType, AlertSeverity, AlertLifecycle
 
 class DatabaseService:
     @staticmethod
@@ -88,25 +90,60 @@ class AlertService:
             "health": health_with_overall,
         }
         try:
-            await manager.broadcast(payload)
+            # Assume EventType can be imported from schemas.websocket
+            from schemas.websocket import EventType
+            ws_event = manager.format_event(
+                event_type=EventType.SENSOR_UPDATE,
+                payload=payload,
+                cattle_id=cattle_id
+            )
+            await manager.broadcast(ws_event)
         except Exception as e:
             print(f"Failed to broadcast alert: {e}")
 
     @staticmethod
     def create_db_alert(cattle_id: str, alert_type: str, parameter: str, value: str, severity: str = "Critical"):
+        # Legacy compat
+        pass
+
+    @staticmethod
+    def create_db_alert_from_payload(payload: dict):
         db = SessionLocal()
         try:
+            # Convert value to float if possible
+            val = payload.get("value")
+            if val is not None:
+                try:
+                    val = float(val)
+                except ValueError:
+                    val = None
+                    
             alert = models.Alert(
-                cattle_id=cattle_id,
-                alert_type=alert_type,
-                parameter=parameter,
-                actual_value=value,
-                severity=severity
+                cattle_id=payload.get("cattle_id"),
+                device_id=payload.get("device_id"),
+                type=payload.get("type"),
+                severity=payload.get("severity"),
+                message=payload.get("message"),
+                value=val,
+                threshold=payload.get("threshold"),
+                confidence=payload.get("confidence"),
+                status=payload.get("status", AlertLifecycle.ACTIVE)
             )
             db.add(alert)
             db.commit()
-        except Exception:
+            
+            if payload.get("severity") == "CRITICAL":
+                from emergency_system import EmergencySystem
+                EmergencySystem.process_critical_event(
+                    db,
+                    cattle_id=payload.get("cattle_id"),
+                    alert_type=payload.get("type"),
+                    severity=payload.get("severity"),
+                    message=payload.get("message")
+                )
+        except Exception as e:
             db.rollback()
+            print(f"Failed to save alert to DB: {e}")
         finally:
             db.close()
 
@@ -174,20 +211,95 @@ class SensorService:
             preds["mems"]["status"] = "abnormal"
             preds["mems"]["reason"] = f"Fall Detected! Confidence: {validated_data.get('fall_confidence')}"
             
-            # Save critical alert to DB
-            AlertService.create_db_alert(
+            # Save critical alert
+            fall_payload = await EngineAlertService.process_alert_async(
                 cattle_id=cattle_id,
-                alert_type="Fall Detected",
-                parameter="mems",
-                value=f"Confidence: {validated_data.get('fall_confidence')}"
+                device_id=validated_data.get("device_id", "UNKNOWN"),
+                alert_type=AlertType.FALL,
+                severity=AlertSeverity.CRITICAL,
+                message="Fall detected",
+                value=validated_data.get("peak_acceleration"),
+                confidence=validated_data.get('fall_confidence'),
+                websocket_manager=manager
             )
+            if fall_payload:
+                AlertService.create_db_alert_from_payload(fall_payload)
+            
+            # Store fall event separately
+            db = SessionLocal()
+            try:
+                fall_event = models.FallEvent(
+                    cattle_id=cattle_id,
+                    peak_acceleration=validated_data.get("peak_acceleration"),
+                    activity_score=validated_data.get("activity_score"),
+                    fall_confidence=validated_data.get("fall_confidence")
+                )
+                db.add(fall_event)
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Failed to store fall event: {e}")
+            finally:
+                db.close()
             
         DatabaseService.save_prediction(reading_id, preds)
         
         # Engine evaluation
         ml_pred_for_engine = {"overall": {"status": "abnormal" if any(v.get('status') == 'abnormal' for v in preds.values()) else "normal"}}
-        assessment = HealthRiskEngine.evaluate(validated_data, ml_pred_for_engine)
+        
+        # Calculate baselines
+        db = SessionLocal()
+        try:
+            cow_baseline = BaselineEngine.calculate_baselines(db, cattle_id, window="24_hours")
+        except Exception as e:
+            logger.error(f"Failed to calculate baselines: {e}")
+            cow_baseline = None
+        finally:
+            db.close()
+        
+        assessment = HealthRiskEngine.evaluate(validated_data, ml_pred_for_engine, cow_baseline=cow_baseline)
         DatabaseService.save_health_assessment(cattle_id, assessment)
+        
+        # Generate HEALTH_RISK alert if needed
+        risk_level = assessment.get("risk_level")
+        if risk_level in ["WARNING", "CRITICAL"]:
+            severity = AlertSeverity.CRITICAL if risk_level == "CRITICAL" else AlertSeverity.WARNING
+            risk_payload = await EngineAlertService.process_alert_async(
+                cattle_id=cattle_id,
+                device_id=validated_data.get("device_id", "UNKNOWN"),
+                alert_type=AlertType.HEALTH_RISK,
+                severity=severity,
+                message=f"Health Risk Level: {risk_level}",
+                value=float(assessment.get("health_score", 0)),
+                confidence=assessment.get("confidence", 0.0),
+                websocket_manager=manager
+            )
+            if risk_payload:
+                AlertService.create_db_alert_from_payload(risk_payload)
+
+        # Generate specific sensor alerts
+        mapping = {
+            "spo2": AlertType.SPO2,
+            "heart_rate": AlertType.HEART_RATE,
+            "temperature": AlertType.TEMPERATURE,
+            "ph": AlertType.PH,
+            "activity": AlertType.ACTIVITY
+        }
+        for sensor, pred in preds.items():
+            if pred.get("status") == "abnormal" and sensor in mapping:
+                val = validated_data.get(sensor)
+                s_payload = await EngineAlertService.process_alert_async(
+                    cattle_id=cattle_id,
+                    device_id=validated_data.get("device_id", "UNKNOWN"),
+                    alert_type=mapping[sensor],
+                    severity=AlertSeverity.WARNING,
+                    message=f"{sensor.upper()} is abnormal",
+                    value=val,
+                    confidence=0.8,
+                    websocket_manager=manager
+                )
+                if s_payload:
+                    AlertService.create_db_alert_from_payload(s_payload)
         
         await AlertService.broadcast_alert(manager, validated_data["cattle_id"], validated_data, preds, assessment)
         logger.info(f"[SENSOR SAVED] reading_id={reading_id} overall={'abnormal' if any(v.get('status')=='abnormal' for v in preds.values()) else 'normal'} risk={assessment.get('risk_level')}")

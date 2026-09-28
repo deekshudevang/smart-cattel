@@ -27,14 +27,14 @@ class AnalyticsService:
             cow_totals[r.cattle_id] += r.quantity
             total_qty += r.quantity
             
-        avg_production = total_qty / len(daily_totals) if daily_totals else 0
+        avg_production = (total_qty / len(daily_totals)) if daily_totals else None
         
         trend = [{"date": k, "quantity": v} for k, v in sorted(daily_totals.items())]
         
         return {
-            "daily_production": trend[-1]["quantity"] if trend else 0,
-            "weekly_production": sum(v for k, v in list(daily_totals.items())[-7:]),
-            "monthly_production": total_qty,
+            "daily_production": trend[-1]["quantity"] if trend else None,
+            "weekly_production": sum(v for k, v in list(daily_totals.items())[-7:]) if trend else None,
+            "monthly_production": total_qty if trend else None,
             "average_production": avg_production,
             "cow_wise": [{"cattle_id": k, "quantity": v} for k, v in cow_totals.items()],
             "trend": trend
@@ -69,19 +69,20 @@ class AnalyticsService:
             day_str = r.date.strftime('%Y-%m-%d')
             daily_milk[day_str] += r.quantity
             
-        # Feed efficiency: milk produced / feed consumed per day
+        # Feed efficiency: milk produced / feed consumed per day (milk/feed ratio)
         efficiency_trend = []
         for day in sorted(daily_feed.keys()):
             feed_qty = daily_feed[day]
             milk_qty = daily_milk.get(day, 0)
-            eff = milk_qty / feed_qty if feed_qty > 0 else 0
-            efficiency_trend.append({"date": day, "efficiency": round(eff, 2)})
+            eff = milk_qty / feed_qty if feed_qty > 0 else None
+            efficiency_trend.append({"date": day, "efficiency": round(eff, 2) if eff is not None else None})
             
         trend = [{"date": k, "quantity": v} for k, v in sorted(daily_feed.items())]
         
         return {
-            "daily_consumption": trend[-1]["quantity"] if trend else 0,
-            "weekly_consumption": sum(v for k, v in list(daily_feed.items())[-7:]),
+            "daily_consumption": trend[-1]["quantity"] if trend else None,
+            "weekly_consumption": sum(v for k, v in list(daily_feed.items())[-7:]) if trend else None,
+            "monthly_consumption": total_feed if trend else None,
             "cow_wise": [{"cattle_id": k, "quantity": v} for k, v in cow_feed.items()],
             "trend": trend,
             "efficiency_trend": efficiency_trend
@@ -98,9 +99,11 @@ class AnalyticsService:
         records = query.order_by(asc(models.Activity.date)).all()
         
         daily_steps = defaultdict(int)
+        total_steps = 0
         for r in records:
             day_str = r.date.strftime('%Y-%m-%d')
             daily_steps[day_str] += r.steps
+            total_steps += r.steps
             
         trend = [{"date": k, "steps": v} for k, v in sorted(daily_steps.items())]
         
@@ -110,7 +113,9 @@ class AnalyticsService:
         ]
         
         return {
-            "daily_steps": trend[-1]["steps"] if trend else 0,
+            "daily_steps": trend[-1]["steps"] if trend else None,
+            "weekly_steps": sum(v for k, v in list(daily_steps.items())[-7:]) if trend else None,
+            "monthly_steps": total_steps if trend else None,
             "trend": trend,
             "inactivity_periods": sorted(inactivity_periods, key=lambda x: x["date"])
         }
@@ -143,8 +148,8 @@ class AnalyticsService:
         prev_activity = get_metric_sum(models.Activity, "steps", prev_start, recent_start)
 
         def calc_trend(recent, prev):
-            if prev == 0:
-                return 0 # Not enough data
+            if prev == 0 or prev is None or recent is None:
+                return None # Not enough data
             return (recent - prev) / prev
 
         milk_trend = calc_trend(recent_milk, prev_milk)
@@ -153,27 +158,28 @@ class AnalyticsService:
 
         observations = []
         
-        if milk_trend < -0.1 and feed_trend < -0.1 and activity_trend < -0.1:
-            observations.append({
-                "type": "CORRELATION_OBSERVED",
-                "message": "Observed correlation: Milk production, feed intake, and activity have all decreased over the last 7 days compared to the previous week.",
-                "note": "This is an observed statistical correlation based on recorded data, not a medical diagnosis. Please inspect the animal.",
-                "metrics": {
-                    "milk_change_pct": round(milk_trend * 100, 1),
-                    "feed_change_pct": round(feed_trend * 100, 1),
-                    "activity_change_pct": round(activity_trend * 100, 1)
-                }
-            })
-            
-        elif milk_trend < -0.1 and feed_trend < -0.1:
-             observations.append({
-                "type": "CORRELATION_OBSERVED",
-                "message": "Observed correlation: Both milk production and feed intake have decreased over the last 7 days.",
-                "note": "This is an observed statistical correlation based on recorded data, not a medical diagnosis. Please inspect the animal.",
-                "metrics": {
-                    "milk_change_pct": round(milk_trend * 100, 1),
-                    "feed_change_pct": round(feed_trend * 100, 1),
-                }
-            })
+        if milk_trend is not None and feed_trend is not None and activity_trend is not None:
+            if milk_trend < -0.1 and feed_trend < -0.1 and activity_trend < -0.1:
+                observations.append({
+                    "type": "CORRELATION_OBSERVED",
+                    "message": "Observed correlation: Milk production, feed intake, and activity have all decreased over the last 7 days compared to the previous week.",
+                    "note": "This is an observed statistical correlation based on recorded data, not a medical diagnosis. Please inspect the animal.",
+                    "metrics": {
+                        "milk_change_pct": round(milk_trend * 100, 1),
+                        "feed_change_pct": round(feed_trend * 100, 1),
+                        "activity_change_pct": round(activity_trend * 100, 1)
+                    }
+                })
+                
+            elif milk_trend < -0.1 and feed_trend < -0.1:
+                 observations.append({
+                    "type": "CORRELATION_OBSERVED",
+                    "message": "Observed correlation: Both milk production and feed intake have decreased over the last 7 days.",
+                    "note": "This is an observed statistical correlation based on recorded data, not a medical diagnosis. Please inspect the animal.",
+                    "metrics": {
+                        "milk_change_pct": round(milk_trend * 100, 1),
+                        "feed_change_pct": round(feed_trend * 100, 1),
+                    }
+                })
 
         return observations

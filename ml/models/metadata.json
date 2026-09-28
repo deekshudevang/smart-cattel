@@ -1,34 +1,8 @@
 {
-    "version": "20260928203849",
-    "timestamp": "2026-09-28T20:38:50.035028",
-    "features": [
-        "spo2",
-        "heart_rate",
-        "temperature",
-        "humidity",
-        "mems_x",
-        "mems_y",
-        "mems_z",
-        "acceleration_magnitude",
-        "ph",
-        "ldr",
-        "activity"
-    ],
+    "version": "20260928223703",
+    "timestamp": "2026-09-28T22:37:03.477157",
+    "model_type": "RandomForestClassifier",
     "labels": [
         "overall_status"
-    ],
-    "metrics": {
-        "overall_status": {
-            "accuracy": 1.0,
-            "precision": 1.0,
-            "recall": 1.0,
-            "f1_score": 1.0,
-            "roc_auc": null,
-            "confusion_matrix": [
-                [
-                    33
-                ]
-            ]
-        }
-    }
+    ]
 }

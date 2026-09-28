@@ -52,9 +52,12 @@ bool ldr_valid = false;
 
 DHT dht(DHTPIN, DHTTYPE);
 
-float temperature = 0;
-float humidity = 0;
+float temperature = NAN;
+float humidity = NAN;
 bool dht_valid = false;
+float dht_sensor_quality = 1.0;
+unsigned long dht_last_successful_read = 0;
+int dht_consecutive_failures = 0;
 
 // ---------- MAX30102 ----------
 MAX30105 particleSensor;
@@ -94,6 +97,7 @@ float displayBPMQuality = 0.0;
 float displaySpO2Quality = 0.0;
 bool displayBPMValid = false;
 bool displaySpO2Valid = false;
+String displayState = "NO_SENSOR";
 
 unsigned long last_data_sent = 0;
 
@@ -228,9 +232,31 @@ void loop() {
   // ---------- DHT11 Read ----------
   static unsigned long lastDhtRead = 0;
   if (millis() - lastDhtRead >= 2000) {
-    temperature = dht.readTemperature();
-    humidity = dht.readHumidity();
-    dht_valid = !isnan(temperature) && !isnan(humidity);
+    float temp = dht.readTemperature();
+    float hum = dht.readHumidity();
+    
+    if (isnan(temp) || isnan(hum)) {
+      dht_valid = false;
+      dht_consecutive_failures++;
+      dht_sensor_quality = 0.0;
+      temperature = NAN;
+      humidity = NAN;
+    } else {
+      if (temp >= -20.0 && temp <= 60.0 && hum >= 0.0 && hum <= 100.0) {
+        dht_valid = true;
+        dht_consecutive_failures = 0;
+        dht_sensor_quality = 1.0;
+        dht_last_successful_read = millis();
+        temperature = temp;
+        humidity = hum;
+      } else {
+        dht_valid = false;
+        dht_consecutive_failures++;
+        dht_sensor_quality = 0.5; // Out of bounds but responding
+        temperature = NAN;
+        humidity = NAN;
+      }
+    }
     lastDhtRead = millis();
   }
 
@@ -282,6 +308,12 @@ void loop() {
 
     // 4. Contact/finger/probe detection
     bool has_contact = (current_value_ir > kFingerThreshold && current_value_red > kFingerThreshold);
+    
+    if (!has_contact) {
+        displayState = "NO_CONTACT";
+    } else if (displayState == "NO_SENSOR" || displayState == "NO_CONTACT") {
+        displayState = "PROCESSING";
+    }
 
 #if DEBUG_MAX30102
     if (millis() - last_raw_print >= 2000) {
@@ -373,6 +405,7 @@ void loop() {
               bool is_spo2_valid = (spo2 > 50 && spo2 <= 100) && (quality > 0.3);
 
               if (is_bpm_valid && is_spo2_valid) {
+                displayState = "VALID";
                 displayBPM  = bpm;
                 displaySpO2 = (int)spo2;
                 displayBPMValid = true;
@@ -391,6 +424,11 @@ void loop() {
                 Serial.println(quality);
 #endif
               } else {
+                if (red_ac < 100 || ir_ac < 100) {
+                  displayState = "LOW_SIGNAL";
+                } else {
+                  displayState = "UNSTABLE";
+                }
                 displayBPMValid = false;
                 displaySpO2Valid = false;
                 displayBPMQuality = quality;
@@ -476,6 +514,10 @@ void loop() {
     // MAX30102 — null when no valid reading, never fake
     bool hr_ok   = max_valid && finger_detected && displayBPMValid;
     bool spo2_ok = max_valid && finger_detected && displaySpO2Valid;
+    
+    if (!max_valid) displayState = "NO_SENSOR";
+    json += "\"max_state\":\"" + displayState + "\",";
+    
     json += spo2_ok ? ("\"spo2\":" + String(displaySpO2) + ",") : "\"spo2\":null,";
     json += "\"spo2_valid\":" + String(spo2_ok ? "true" : "false") + ",";
     json += "\"spo2_quality\":" + String(displaySpO2Quality, 2) + ",";
@@ -497,6 +539,8 @@ void loop() {
       json += "\"humidity\":null,";
       json += "\"humidity_valid\":false,";
     }
+    json += "\"sensor_quality\":" + String(dht_sensor_quality, 2) + ",";
+    json += "\"last_successful_read\":" + String(dht_last_successful_read) + ",";
 
     // ADXL345
     if (adxl_valid) {

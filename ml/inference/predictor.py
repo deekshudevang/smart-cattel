@@ -23,7 +23,7 @@ class HealthPredictor:
 
     def predict(self, sensor_data: dict):
         if not self.model or not self.metadata:
-            return self._fallback_predict(sensor_data)
+            raise RuntimeError("Model or metadata not found. Cannot predict.")
             
         features = self.metadata["features"]
         labels = self.metadata["labels"]
@@ -71,11 +71,3 @@ class HealthPredictor:
             }
         }
 
-    def _fallback_predict(self, sensor_data: dict):
-        return {
-            "overall": {
-                "status": "normal",
-                "confidence": 0.5,
-                "reason": "Fallback normal (Model missing)"
-            }
-        }
