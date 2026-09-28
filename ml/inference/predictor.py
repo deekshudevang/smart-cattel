@@ -1,53 +1,81 @@
 import os
 import joblib
+import json
+import numpy as np
 
 class HealthPredictor:
     def __init__(self):
-        self.models = {}
-        self.load_models()
+        self.model = None
+        self.metadata = None
+        self.load_model()
         
-    def load_models(self):
-        model_names = ["spo2", "bpm", "mems", "temperature", "ldr", "ph"]
-        base_path = os.path.join(os.path.dirname(__file__), "../models")
+    def load_model(self):
+        base_path = os.path.join(os.path.dirname(__file__), "..", "models")
+        model_path = os.path.join(base_path, "multivariate_model.pkl")
+        meta_path = os.path.join(base_path, "metadata.json")
         
-        for name in model_names:
-            path = os.path.join(base_path, f"{name}.pkl")
-            if os.path.exists(path):
-                self.models[name] = joblib.load(path)
-            else:
-                print(f"Warning: Model {name}.pkl not found")
+        if os.path.exists(model_path) and os.path.exists(meta_path):
+            self.model = joblib.load(model_path)
+            with open(meta_path, "r") as f:
+                self.metadata = json.load(f)
+        else:
+            print("Warning: Multivariate model or metadata not found. Run pipeline.py first.")
 
     def predict(self, sensor_data: dict):
-        predictions = {}
-        for key, value in sensor_data.items():
-            if not isinstance(value, (int, float)):
-                continue
+        if not self.model or not self.metadata:
+            return self._fallback_predict(sensor_data)
+            
+        features = self.metadata["features"]
+        labels = self.metadata["labels"]
+        
+        # 1. Feature Engineering
+        if "mems_x" in sensor_data and "mems_y" in sensor_data and "mems_z" in sensor_data:
+            if "acceleration_magnitude" not in sensor_data:
+                sensor_data["acceleration_magnitude"] = np.sqrt(
+                    sensor_data["mems_x"]**2 + 
+                    sensor_data["mems_y"]**2 + 
+                    sensor_data["mems_z"]**2
+                )
+            if "activity" not in sensor_data:
+                sensor_data["activity"] = abs(sensor_data["acceleration_magnitude"] - 9.81)
                 
-            model_key = key
-            if key == "mems_x":
-                model_key = "mems"
-                
-            if model_key in self.models:
-                try:
-                    pred = self.models[model_key].predict([[value]])[0]
-                    # Attempt to get probability if supported
-                    if hasattr(self.models[model_key], "predict_proba"):
-                        proba = self.models[model_key].predict_proba([[value]])[0]
-                        confidence = round(float(max(proba)), 2)
-                    else:
-                        confidence = 0.85 # fallback
-                except Exception:
-                    pred = 1 # default normal
-                    confidence = 0.5
-                    
-                status = "normal" if pred == 1 else "abnormal"
-                reason = "Values are within healthy bounds" if status == "normal" else f"{key.capitalize()} detected as abnormal by the model"
-                
-                predictions[model_key] = {
-                    "status": status,
-                    "value": value,
-                    "confidence": confidence,
-                    "reason": reason
-                }
-                
-        return predictions
+        # 2. Build feature vector
+        vector = []
+        for f in features:
+            val = sensor_data.get(f, 0.0)
+            if not isinstance(val, (int, float)):
+                val = 0.0
+            vector.append(val)
+            
+        # 3. Predict
+        try:
+            pred = self.model.predict([vector])[0]
+            if hasattr(self.model, "predict_proba"):
+                proba = self.model.predict_proba([vector])[0]
+                confidence = round(float(max(proba)), 2)
+            else:
+                confidence = 0.85
+        except Exception:
+            pred = 0
+            confidence = 0.5
+            
+        # 4. Format output
+        status = "abnormal" if pred == 1 else "normal"
+        reason = "Values are within healthy bounds" if status == "normal" else "Model detected anomaly"
+        
+        return {
+            "overall": {
+                "status": status,
+                "confidence": confidence,
+                "reason": reason
+            }
+        }
+
+    def _fallback_predict(self, sensor_data: dict):
+        return {
+            "overall": {
+                "status": "normal",
+                "confidence": 0.5,
+                "reason": "Fallback normal (Model missing)"
+            }
+        }

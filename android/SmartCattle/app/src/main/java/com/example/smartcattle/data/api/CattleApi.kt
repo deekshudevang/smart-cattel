@@ -11,7 +11,7 @@ import retrofit2.http.Query
 // Raw API response shapes that mirror the backend JSON exactly
 data class ApiHealthResponse(
     val spo2: String = "unknown",
-    val bpm: String = "unknown",
+    val heart_rate: String = "unknown",
     val temperature: String = "unknown",
     val mems: String = "unknown",
     val ph: String = "unknown",
@@ -23,7 +23,7 @@ data class ApiLatestResponse(
     val cattle_id: String,
     val timestamp: String,
     val spo2: Int?,
-    val bpm: Int?,
+    val heart_rate: Int?,
     val temperature: Float?,
     val humidity: Float?,
     val mems_x: Float?,
@@ -38,7 +38,7 @@ data class ApiLatestResponse(
 data class ApiHistoryResponse(
     val timestamp: String,
     val spo2: Int?,
-    val bpm: Int?,
+    val heart_rate: Int?,
     val temperature: Float?,
     val humidity: Float?,
     val mems_x: Float?,
@@ -61,7 +61,7 @@ data class ApiAlertResponse(
 data class ApiLatestHealth(
     val timestamp: String?,
     val spo2: Int?,
-    val bpm: Int?,
+    val heart_rate: Int?,
     val temperature: Float?,
     val overall_status: String?
 )
@@ -159,7 +159,7 @@ fun ApiLatestResponse.toSensorData() = SensorData(
     cattleId = cattle_id,
     timestamp = timestamp,
     spo2 = spo2,
-    bpm = bpm,
+    heart_rate = heart_rate,
     temperature = temperature,
     humidity = humidity,
     memsX = mems_x,
@@ -168,13 +168,13 @@ fun ApiLatestResponse.toSensorData() = SensorData(
     ph = ph,
     ldr = ldr,
     fallDetected = fall_detected,
-    health = health?.let { HealthStatus(it.spo2, it.bpm, it.temperature, it.mems, it.ph, it.ldr, it.overall) } ?: HealthStatus()
+    health = health?.let { HealthStatus(it.spo2, it.heart_rate, it.temperature, it.mems, it.ph, it.ldr, it.overall) } ?: HealthStatus()
 )
 
 fun ApiHistoryResponse.toHistoryRow() = HistoryRow(
     timestamp = timestamp,
     spo2 = spo2,
-    bpm = bpm,
+    heart_rate = heart_rate,
     temperature = temperature,
     humidity = humidity,
     memsX = mems_x,
@@ -183,7 +183,7 @@ fun ApiHistoryResponse.toHistoryRow() = HistoryRow(
     ph = ph,
     ldr = ldr,
     fallDetected = fall_detected,
-    health = health?.let { HealthStatus(it.spo2, it.bpm, it.temperature, it.mems, it.ph, it.ldr, it.overall) } ?: HealthStatus()
+    health = health?.let { HealthStatus(it.spo2, it.heart_rate, it.temperature, it.mems, it.ph, it.ldr, it.overall) } ?: HealthStatus()
 )
 
 fun ApiAlertResponse.toAlertRow() = AlertRow(

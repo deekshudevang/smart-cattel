@@ -99,7 +99,7 @@ class CattleViewModel(private val repository: CattleRepository) : ViewModel() {
                         cattleId    = root.optString("cattle_id", "CATTLE-001"),
                         timestamp   = root.optString("timestamp", ""),
                         spo2        = getIntOrNull("spo2"),
-                        bpm         = getIntOrNull("bpm"),
+                        heart_rate         = getIntOrNull("heart_rate"),
                         temperature = getFloatOrNull("temperature"),
                         humidity    = getFloatOrNull("humidity"),
                         memsX       = getFloatOrNull("mems_x"),
@@ -110,7 +110,7 @@ class CattleViewModel(private val repository: CattleRepository) : ViewModel() {
                         fallDetected = fallDetected,
                         health = HealthStatus(
                             spo2        = healthStr("spo2"),
-                            bpm         = healthStr("bpm"),
+                            heart_rate         = healthStr("heart_rate"),
                             temperature = healthStr("temperature"),
                             mems        = healthStr("mems"),
                             ph          = healthStr("ph"),

@@ -17,7 +17,7 @@ def train_and_save():
 
     features = {
         "spo2": data["spo2"],
-        "bpm": data["bpm"],
+        "heart_rate": data["heart_rate"],
         "mems": data["x"],
         "temperature": data["temp"],
         "ldr": data["ldr"],
@@ -25,7 +25,7 @@ def train_and_save():
     }
     labels = {
         "spo2": data["spo2_label"].astype(int),
-        "bpm": data["bpm_label"].astype(int),
+        "heart_rate": data["bpm_label"].astype(int),
         "mems": data["x_label"].astype(int),
         "temperature": data["temp_label"].astype(int),
         "ldr": data["ldr_lable"].astype(int),

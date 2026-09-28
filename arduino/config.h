@@ -8,5 +8,6 @@
 #define PH_SERIAL Serial3
 #define GPS_GSM_RX 51
 #define GPS_GSM_TX 52
+#define SMS_PHONE_NUMBER "+1234567890"
 
 #endif

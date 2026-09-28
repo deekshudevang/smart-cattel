@@ -103,7 +103,7 @@ data class CowProfile(
     val status: String?,
     // latest sensor summary
     val latestSpo2: Int? = null,
-    val latestBpm: Int? = null,
+    val latestHeartRate: Int? = null,
     val latestTemp: Float? = null,
     val overallStatus: String? = null,
     // latest milk/feed/activity
@@ -118,17 +118,17 @@ data class CowProfile(
 
 // ── API Retrofit Models ──
 data class ApiCattle(val cattle_id: String, val name: String, val status: String)
-data class ApiHealth(val spo2: String, val bpm: String, val temperature: String, val mems: String, val ph: String, val ldr: String, val overall: String)
+data class ApiHealth(val spo2: String, val heart_rate: String, val temperature: String, val mems: String, val ph: String, val ldr: String, val overall: String)
 data class ApiLatest(
     val cattle_id: String, val timestamp: String,
-    val spo2: Int?, val bpm: Int?, val temperature: Float?,
+    val spo2: Int?, val heart_rate: Int?, val temperature: Float?,
     val humidity: Float?, val mems_x: Float?, val mems_y: Float?, val mems_z: Float?,
     val ph: Float?, val ldr: Int?,
     val fall_detected: Boolean, val health: ApiHealth
 )
 data class ApiHistoryRow(
     val timestamp: String,
-    val spo2: Int?, val bpm: Int?, val temperature: Float?,
+    val spo2: Int?, val heart_rate: Int?, val temperature: Float?,
     val humidity: Float?, val mems_x: Float?, val mems_y: Float?, val mems_z: Float?,
     val ph: Float?, val ldr: Int?,
     val fall_detected: Boolean, val health: ApiHealth
@@ -170,7 +170,7 @@ data class ApiCowProfile(
     val latest_activity: ApiLatestActivity?,
     val active_alerts_count: Int?
 )
-data class ApiLatestHealth(val timestamp: String?, val spo2: Int?, val bpm: Int?, val temperature: Float?, val overall_status: String?)
+data class ApiLatestHealth(val timestamp: String?, val spo2: Int?, val heart_rate: Int?, val temperature: Float?, val overall_status: String?)
 data class ApiLatestMilk(val quantity: Float?, val unit: String?, val date: String?)
 data class ApiLatestFeed(val quantity: Float?, val unit: String?, val date: String?)
 data class ApiLatestActivity(val steps: Int?, val date: String?)
@@ -242,13 +242,13 @@ class CattleViewModel : ViewModel() {
             viewModelScope.launch {
                 try {
                     val apiCattleList = api?.getCattle() ?: emptyList()
-                    val uiCattleList = apiCattleList.map { Cattle(it.cattle_id, it.name, "Gir", "4 yrs", it.status, emptyList()) }
+                    val uiCattleList = apiCattleList.map { Cattle(it.cattle_id, it.name, "Not Available", "Not Available", it.status, emptyList()) }
                     _cattle.value = uiCattleList
 
                     val populated = uiCattleList.map { c ->
                         try {
                             val r = api?.getLatestReading(c.id)
-                            if (r != null) buildCattleFromLatest(r) else c
+                            if (r != null) buildCattleFromLatest(r, c.name) else c
                         } catch (e: Exception) { c }
                     }
                     _cattle.value = populated
@@ -374,20 +374,20 @@ class CattleViewModel : ViewModel() {
 
     // ── Sensor helpers ──
 
-    private fun buildCattleFromLatest(r: ApiLatest): Cattle {
+    private fun buildCattleFromLatest(r: ApiLatest, name: String): Cattle {
         fun sStatus(s: String) = s.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
         fun sColor(s: String): Color = if (s == "abnormal") Red else Green
         val fallDetected = r.fall_detected || r.health.mems == "abnormal"
         val sensors = listOf(
-            Sensor("💓", "SpO2", r.spo2?.toString() ?: "--", "%", sStatus(r.health.spo2), sColor(r.health.spo2)),
-            Sensor("❤️", "Heart Rate", r.bpm?.toString() ?: "--", "bpm", sStatus(r.health.bpm), sColor(r.health.bpm)),
-            Sensor("🌡️", "Body Temp", r.temperature?.let { String.format(Locale.US, "%.1f", it) } ?: "--", "°C", sStatus(r.health.temperature), sColor(r.health.temperature)),
-            Sensor("🧪", "pH Level", r.ph?.let { String.format(Locale.US, "%.1f", it) } ?: "--", "", sStatus(r.health.ph), sColor(r.health.ph)),
-            Sensor("☀️", "Light", r.ldr?.toString() ?: "--", "lux", sStatus(r.health.ldr), sColor(r.health.ldr)),
-            Sensor("🏃", "Motion", r.mems_x?.let { String.format(Locale.US, "%.2f", it) } ?: "--", "g", if (fallDetected) "Fall Detected" else sStatus(r.health.mems), if (fallDetected) Red else sColor(r.health.mems))
+            Sensor("💓", "SpO2", r.spo2?.let { if (it == 0) null else it.toString() } ?: "Not Available", "%", sStatus(r.health.spo2), sColor(r.health.spo2)),
+            Sensor("❤️", "Heart Rate", r.heart_rate?.let { if (it == 0) null else it.toString() } ?: "Not Available", "heart_rate", sStatus(r.health.heart_rate), sColor(r.health.heart_rate)),
+            Sensor("🌡️", "Body Temp", r.temperature?.let { if (it == 0f) null else String.format(Locale.US, "%.1f", it) } ?: "Not Available", "°C", sStatus(r.health.temperature), sColor(r.health.temperature)),
+            Sensor("🧪", "pH Level", r.ph?.let { if (it == 0f) null else String.format(Locale.US, "%.1f", it) } ?: "Not Available", "", sStatus(r.health.ph), sColor(r.health.ph)),
+            Sensor("☀️", "Light", r.ldr?.let { if (it == 0) null else it.toString() } ?: "Not Available", "lux", sStatus(r.health.ldr), sColor(r.health.ldr)),
+            Sensor("🏃", "Motion", r.mems_x?.let { if (it == 0f) null else String.format(Locale.US, "%.2f", it) } ?: "Not Available", "g", if (fallDetected) "Fall Detected" else sStatus(r.health.mems), if (fallDetected) Red else sColor(r.health.mems))
         )
         val overall = if (r.health.overall == "abnormal") "At Risk" else "Healthy"
-        return Cattle(r.cattle_id, r.cattle_id, "Gir", "4 yrs", overall, sensors)
+        return Cattle(r.cattle_id, name, "Not Available", "Not Available", overall, sensors)
     }
 
     private suspend fun fetchHistory(cattleId: String) {
@@ -396,10 +396,10 @@ class CattleViewModel : ViewModel() {
             val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
             val histRows = rows.map { r ->
                 val ts = try { timeFormat.format(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).parse(r.timestamp.take(19)) ?: Date()) } catch (e: Exception) { r.timestamp.take(8) }
-                listOf(ts, r.spo2?.toString() ?: "--", r.bpm?.toString() ?: "--",
-                    r.temperature?.let { String.format(Locale.US, "%.1f", it) } ?: "--",
-                    r.humidity?.let { String.format(Locale.US, "%.0f", it) } ?: "--",
-                    r.ph?.let { String.format(Locale.US, "%.1f", it) } ?: "--",
+                listOf(ts, r.spo2?.let { if (it == 0) null else it.toString() } ?: "Not Available", r.heart_rate?.let { if (it == 0) null else it.toString() } ?: "Not Available",
+                    r.temperature?.let { if (it == 0f) null else String.format(Locale.US, "%.1f", it) } ?: "Not Available",
+                    r.humidity?.let { if (it == 0f) null else String.format(Locale.US, "%.0f", it) } ?: "Not Available",
+                    r.ph?.let { if (it == 0f) null else String.format(Locale.US, "%.1f", it) } ?: "Not Available",
                     if (r.fall_detected) "🚨" else "",
                     if (r.health.overall == "normal") "✓" else "⚠")
             }
@@ -422,7 +422,6 @@ class CattleViewModel : ViewModel() {
     private fun connectWebSocket(url: String) {
         val request = Request.Builder().url(url).build()
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
--
             override fun onMessage(webSocket: WebSocket, text: String) {
                 viewModelScope.launch(Dispatchers.Main) {
                     try {
@@ -444,8 +443,9 @@ class CattleViewModel : ViewModel() {
                             val memsColor = if (fallDetected || health.optJSONObject("mems")?.optString("status") == "abnormal") Red else Green
 
                             fun sVal(key: String, format: String? = null): String {
-                                if (data.isNull(key)) return "--"
-                                val raw = data.opt(key) ?: return "--"
+                                if (data.isNull(key)) return "Not Available"
+                                val raw = data.opt(key) ?: return "Not Available"
+                                if (raw is Number && raw.toDouble() == 0.0) return "Not Available"
                                 return if (format != null) {
                                     try { String.format(Locale.US, format, (raw as Number).toDouble()) }
                                     catch (e: Exception) { raw.toString() }
@@ -454,7 +454,7 @@ class CattleViewModel : ViewModel() {
 
                             val sensors = listOf(
                                 Sensor("💓", "SpO2", sVal("spo2"), "%", sStatus("spo2"), sColor("spo2")),
-                                Sensor("❤️", "Heart Rate", sVal("bpm"), "bpm", sStatus("bpm"), sColor("bpm")),
+                                Sensor("❤️", "Heart Rate", sVal("heart_rate"), "heart_rate", sStatus("heart_rate"), sColor("heart_rate")),
                                 Sensor("🌡️", "Body Temp", sVal("temperature", "%.1f"), "°C", sStatus("temperature"), sColor("temperature")),
                                 Sensor("🧪", "pH Level", sVal("ph", "%.1f"), "", sStatus("ph"), sColor("ph")),
                                 Sensor("☀️", "Light", sVal("ldr"), "lux", sStatus("ldr"), sColor("ldr")),
@@ -471,7 +471,7 @@ class CattleViewModel : ViewModel() {
                             val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
                             val t = timeFormat.format(Date())
                             val fallIcon = if (fallDetected) "🚨" else ""
-                            val newRow = listOf(t, sVal("spo2"), sVal("bpm"), sVal("temperature", "%.1f"),
+                            val newRow = listOf(t, sVal("spo2"), sVal("heart_rate"), sVal("temperature", "%.1f"),
                                 sVal("humidity", "%.0f"), sVal("ph", "%.1f"), fallIcon,
                                 if (overall == "Healthy") "✓" else "⚠")
                             _history.value = (_history.value + listOf(newRow)).takeLast(20)
@@ -479,7 +479,7 @@ class CattleViewModel : ViewModel() {
                             if (overall == "At Risk") {
                                 val alertDetails = buildString {
                                     if (health.optJSONObject("spo2")?.optString("status") == "abnormal") append("SpO2 abnormal (${sVal("spo2")}%) • ")
-                                    if (health.optJSONObject("bpm")?.optString("status") == "abnormal") append("BPM abnormal (${sVal("bpm")}) • ")
+                                    if (health.optJSONObject("heart_rate")?.optString("status") == "abnormal") append("Heart Rate abnormal (${sVal("heart_rate")}) • ")
                                     if (health.optJSONObject("temperature")?.optString("status") == "abnormal") append("Temp abnormal (${sVal("temperature", "%.1f")}°C) • ")
                                     if (health.optJSONObject("ph")?.optString("status") == "abnormal") append("pH abnormal (${sVal("ph", "%.1f")}) • ")
                                     if (fallDetected) append("Fall Detected! ")
@@ -515,7 +515,7 @@ private fun ApiCowProfile.toCowProfile(photoPath: String? = null) = CowProfile(
     notes = notes,
     status = status,
     latestSpo2 = latest_health?.spo2,
-    latestBpm = latest_health?.bpm,
+    latestHeartRate = latest_health?.heart_rate,
     latestTemp = latest_health?.temperature,
     overallStatus = latest_health?.overall_status,
     latestMilkQty = latest_milk?.quantity,
@@ -686,9 +686,9 @@ fun MainScreen(viewModel: CattleViewModel, onOpenSettings: () -> Unit) {
 @Composable
 fun DashboardTab(viewModel: CattleViewModel) {
     val cattle by viewModel.cattle.collectAsState()
-    val avgSpo2 = if (cattle.isNotEmpty()) cattle.mapNotNull { c -> c.sensors.find { it.label == "SpO2" }?.value?.toIntOrNull()?.takeIf { it > 0 } }.average().takeIf { !it.isNaN() }?.toInt()?.toString()?.plus("%") ?: "--" else "--"
-    val avgBpm = if (cattle.isNotEmpty()) cattle.mapNotNull { c -> c.sensors.find { it.label == "Heart Rate" }?.value?.toIntOrNull()?.takeIf { it > 0 } }.average().takeIf { !it.isNaN() }?.toInt()?.toString() ?: "--" else "--"
-    val avgTemp = if (cattle.isNotEmpty()) cattle.mapNotNull { c -> c.sensors.find { it.label == "Body Temp" }?.value?.toDoubleOrNull()?.takeIf { it > 0.0 } }.average().takeIf { !it.isNaN() }?.let { String.format(java.util.Locale.US, "%.1f°", it) } ?: "--" else "--"
+    val avgSpo2 = if (cattle.isNotEmpty()) cattle.mapNotNull { c -> c.sensors.find { it.label == "SpO2" }?.value?.toIntOrNull()?.takeIf { it > 0 } }.average().takeIf { !it.isNaN() }?.toInt()?.toString()?.plus("%") ?: "Not Available" else "Not Available"
+    val avgHeartRate = if (cattle.isNotEmpty()) cattle.mapNotNull { c -> c.sensors.find { it.label == "Heart Rate" }?.value?.toIntOrNull()?.takeIf { it > 0 } }.average().takeIf { !it.isNaN() }?.toInt()?.toString() ?: "Not Available" else "Not Available"
+    val avgTemp = if (cattle.isNotEmpty()) cattle.mapNotNull { c -> c.sensors.find { it.label == "Body Temp" }?.value?.toDoubleOrNull()?.takeIf { it > 0.0 } }.average().takeIf { !it.isNaN() }?.let { String.format(java.util.Locale.US, "%.1f°", it) } ?: "Not Available" else "Not Available"
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Color.Transparent)) {
             Box(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(Color(0xFF1B5E20), Color(0xFF004D40), Color(0xFF0D47A1)))).padding(20.dp)) {
@@ -709,7 +709,7 @@ fun DashboardTab(viewModel: CattleViewModel) {
         Spacer(Modifier.height(16.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             VitalCard("💓", "Avg SpO2", avgSpo2, Green, Modifier.weight(1f))
-            VitalCard("❤️", "Avg BPM", avgBpm, Blue, Modifier.weight(1f))
+            VitalCard("❤️", "Avg Heart Rate", avgHeartRate, Blue, Modifier.weight(1f))
             VitalCard("🌡️", "Avg Temp", avgTemp, Orange, Modifier.weight(1f))
         }
         Spacer(Modifier.height(20.dp))
@@ -797,7 +797,7 @@ fun AlertsTab(viewModel: CattleViewModel) {
 @Composable
 fun HistoryTab(viewModel: CattleViewModel) {
     val history by viewModel.history.collectAsState()
-    val headers = listOf("Time", "SpO2", "BPM", "Temp", "Hum", "pH", "Fall", "OK")
+    val headers = listOf("Time", "SpO2", "Heart Rate", "Temp", "Hum", "pH", "Fall", "OK")
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) { Box(Modifier.width(3.dp).height(18.dp).clip(RoundedCornerShape(2.dp)).background(Green)); Spacer(Modifier.width(8.dp)); Text("Sensor History", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = White) }
         Text("Readings log (live + persisted)", fontSize = 11.sp, color = Grey)
@@ -820,7 +820,7 @@ fun HistoryTab(viewModel: CattleViewModel) {
             }
         }
         Spacer(Modifier.height(16.dp))
-        Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = Color.Transparent)) { Box(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(Color(0xFF1A237E), Color(0xFF311B92), Color(0xFF4A148C)))).padding(16.dp)) { Column { Row(verticalAlignment = Alignment.CenterVertically) { Text("🧠", fontSize = 20.sp); Spacer(Modifier.width(8.dp)); Text("ML Analysis Summary", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White) }; Spacer(Modifier.height(10.dp)); Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) { Text("• Random Forest classifier accuracy", fontSize = 10.sp, color = Color.White.copy(alpha = 0.7f)); Text("94.2%", fontSize = 10.sp, color = Cyan, fontWeight = FontWeight.Bold) }; Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) { Text("• Active ML models", fontSize = 10.sp, color = Color.White.copy(alpha = 0.7f)); Text("6 (SpO2, BPM, Temp, MEMS, pH, LDR)", fontSize = 10.sp, color = Cyan, fontWeight = FontWeight.Bold) } } } }
+        Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = Color.Transparent)) { Box(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(Color(0xFF1A237E), Color(0xFF311B92), Color(0xFF4A148C)))).padding(16.dp)) { Column { Row(verticalAlignment = Alignment.CenterVertically) { Text("🧠", fontSize = 20.sp); Spacer(Modifier.width(8.dp)); Text("ML Analysis Summary", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White) }; Spacer(Modifier.height(10.dp)); Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) { Text("• Random Forest classifier accuracy", fontSize = 10.sp, color = Color.White.copy(alpha = 0.7f)); Text("94.2%", fontSize = 10.sp, color = Cyan, fontWeight = FontWeight.Bold) }; Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) { Text("• Active ML models", fontSize = 10.sp, color = Color.White.copy(alpha = 0.7f)); Text("6 (SpO2, Heart Rate, Temp, MEMS, pH, LDR)", fontSize = 10.sp, color = Cyan, fontWeight = FontWeight.Bold) } } } }
     }
 }
 
@@ -1071,13 +1071,13 @@ fun CowProfileScreen(cow: CowProfile, onBack: () -> Unit) {
             Spacer(Modifier.height(8.dp))
             Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = BgCard)) {
                 Column(Modifier.padding(16.dp)) {
-                    if (cow.latestSpo2 == null && cow.latestBpm == null && cow.latestTemp == null) {
+                    if (cow.latestSpo2 == null && cow.latestHeartRate == null && cow.latestTemp == null) {
                         Text("No health readings available yet.", color = Muted, fontSize = 13.sp)
                     } else {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                            MiniStat("💓", "SpO2", cow.latestSpo2?.let { "$it%" } ?: "—", Green)
-                            MiniStat("❤️", "BPM", cow.latestBpm?.toString() ?: "—", Blue)
-                            MiniStat("🌡️", "Temp", cow.latestTemp?.let { String.format(Locale.US, "%.1f°C", it) } ?: "—", Orange)
+                            MiniStat("💓", "SpO2", cow.latestSpo2?.let { if (it == 0) null else "$it%" } ?: "Not Available", Green)
+                            MiniStat("❤️", "Heart Rate", cow.latestHeartRate?.let { if (it == 0) null else it.toString() } ?: "Not Available", Blue)
+                            MiniStat("🌡️", "Temp", cow.latestTemp?.let { if (it == 0f) null else String.format(Locale.US, "%.1f°C", it) } ?: "Not Available", Orange)
                         }
                     }
                 }
@@ -1147,10 +1147,10 @@ fun CowProfileScreen(cow: CowProfile, onBack: () -> Unit) {
 @Composable
 fun ProfileInfoGrid(cow: CowProfile) {
     val fields = listOf(
-        "🐄 Breed" to (cow.breed ?: "—"),
-        "🎂 Age" to (cow.age ?: "—"),
-        "⚥ Gender" to (cow.gender ?: "—"),
-        "📅 DOB" to (cow.dob ?: "—")
+        "🐄 Breed" to (cow.breed ?: "Not Available"),
+        "🎂 Age" to (cow.age ?: "Not Available"),
+        "⚥ Gender" to (cow.gender ?: "Not Available"),
+        "📅 DOB" to (cow.dob ?: "Not Available")
     )
     fields.chunked(2).forEach { row ->
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

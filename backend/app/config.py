@@ -1,28 +1,27 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 
 class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
-    SERIAL_PORT: str = "COM4"
-    SERIAL_BAUDRATE: int = 9600
     DATABASE_URL: str = "sqlite:///./smart_cattle.db"
-    PROD_DATABASE_URL: str = "postgresql://user:password@localhost/dbname"
+    SERIAL_PORT: str = "COM6"
+    SERIAL_BAUDRATE: int = 9600
+    HARDWARE_MODE: str = "arduino"
+    ALLOW_SIMULATION: bool = True
+    JWT_SECRET: str = "fallback_secret_key"
+    SMS_PHONE_NUMBER: str = "+1234567890"
+    CORS_ORIGINS: str = "*"
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
-    SECRET_KEY: str = "fallback_secret_key"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    ALLOWED_ORIGINS: str = "*"
+    ADMIN_USERNAME: str = "admin"
+    ADMIN_PASSWORD: str = "admin"
     
     @property
-    def active_database_url(self) -> str:
-        return self.PROD_DATABASE_URL if self.ENVIRONMENT == "production" else self.DATABASE_URL
+    def cors_origins_list(self) -> List[str]:
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
 
-    @property
-    def cors_origins(self) -> List[str]:
-        return [origin.strip() for origin in self.ALLOWED_ORIGINS.split(",")]
-
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 settings = Settings()

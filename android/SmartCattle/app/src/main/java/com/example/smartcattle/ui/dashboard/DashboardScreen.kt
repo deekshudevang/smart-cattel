@@ -50,7 +50,7 @@ fun DashboardScreen(viewModel: CattleViewModel) {
             StatusDot(connected)
         }
 
-        val d = data ?: SensorData(cattleId = "CATTLE-001", timestamp = "", spo2 = null, bpm = null, temperature = null, humidity = null, memsX = null, memsY = null, memsZ = null, ph = null, ldr = null, fallDetected = false)
+        val d = data ?: SensorData(cattleId = "CATTLE-001", timestamp = "", spo2 = null, heart_rate = null, temperature = null, humidity = null, memsX = null, memsY = null, memsZ = null, ph = null, ldr = null, fallDetected = false)
 
         // ── Overall health banner ──
         val overallColor by animateColorAsState(
@@ -86,10 +86,10 @@ fun DashboardScreen(viewModel: CattleViewModel) {
         val spo2Status = if (!connected || data == null) "unknown" else d.health.spo2
         SensorCard("💓", "SpO2", spo2Val, spo2Unit, spo2Status)
 
-        val bpmVal = if (!connected || d.bpm == null) "--" else if (d.bpm == 0) "Place Finger" else "${d.bpm}"
-        val bpmUnit = if (!connected || d.bpm == null || d.bpm == 0) "" else "bpm"
-        val bpmStatus = if (!connected || data == null) "unknown" else d.health.bpm
-        SensorCard("❤️", "Heart Rate", bpmVal, bpmUnit, bpmStatus)
+        val heartRateVal = if (!connected || d.heart_rate == null) "--" else if (d.heart_rate == 0) "Place Finger" else "${d.heart_rate}"
+        val heartRateUnit = if (!connected || d.heart_rate == null || d.heart_rate == 0) "" else "heart_rate"
+        val heartRateStatus = if (!connected || data == null) "unknown" else d.health.heart_rate
+        SensorCard("❤️", "Heart Rate", heartRateVal, heartRateUnit, heartRateStatus)
         
         val tempVal = if (!connected || d.temperature == null) "--" else String.format(Locale.US, "%.1f", d.temperature)
         val tempStatus = if (!connected || data == null) "unknown" else d.health.temperature

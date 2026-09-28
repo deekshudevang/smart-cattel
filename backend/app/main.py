@@ -23,6 +23,7 @@ from websocket.manager import manager
 from config import settings
 from services import SensorService, PredictionService
 from auth import get_current_user, require_admin
+from routers import analytics
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -39,11 +40,12 @@ models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Smart Cattle Health Monitoring API")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.include_router(analytics.router)
 
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=settings.cors_origins_list,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -84,27 +86,41 @@ class ActivityCreate(BaseModel):
 class CowCreate(BaseModel):
     cattle_id: str
     name: str
+    photo: Optional[str] = None
     breed: Optional[str] = None
     age: Optional[str] = None
     gender: Optional[str] = None
-    dob: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    weight: Optional[float] = None
+    tag_id: Optional[str] = None
+    lactation_stage: Optional[str] = None
+    pregnancy_status: Optional[str] = None
     notes: Optional[str] = None
+    medical_history: Optional[str] = None
+    device_id: Optional[str] = None
 
 class CowUpdate(BaseModel):
     name: Optional[str] = None
+    photo: Optional[str] = None
     breed: Optional[str] = None
     age: Optional[str] = None
     gender: Optional[str] = None
-    dob: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    weight: Optional[float] = None
+    tag_id: Optional[str] = None
+    lactation_stage: Optional[str] = None
+    pregnancy_status: Optional[str] = None
     notes: Optional[str] = None
+    medical_history: Optional[str] = None
+    device_id: Optional[str] = None
 
 from fastapi.security import OAuth2PasswordRequestForm
 from backend.app.auth import create_access_token
 
 @app.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    # Dummy authentication for testing
-    if form_data.username != "admin" or form_data.password != "admin":
+    # Authentication using configuration settings
+    if form_data.username != settings.ADMIN_USERNAME or form_data.password != settings.ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Incorrect username or password")
     access_token = create_access_token(data={"sub": form_data.username, "role": "ADMIN"})
     return {"access_token": access_token, "token_type": "bearer"}
@@ -116,9 +132,9 @@ async def _offline_monitor():
         try:
             await asyncio.sleep(2)
             if time.time() - last_arduino_time > 5.0:
-                await manager.broadcast(json.dumps({"type": "status", "status": "offline"}))
+                await manager.broadcast({"type": "status", "status": "offline"})
             else:
-                await manager.broadcast(json.dumps({"type": "status", "status": "online"}))
+                await manager.broadcast({"type": "status", "status": "online"})
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -141,14 +157,14 @@ def handle_arduino_data(data: dict):
 
         preds = result["predictions"]
         a = "1" if preds.get("spo2", {}).get("status", "normal") == "normal" else "0"
-        b = "1" if preds.get("bpm", {}).get("status", "normal") == "normal" else "0"
+        b = "1" if preds.get("heart_rate", {}).get("status", "normal") == "normal" else "0"
         c = "1" if preds.get("temperature", {}).get("status", "normal") == "normal" else "0"
         d = "1" if preds.get("mems", {}).get("status", "normal") == "normal" else "0"
         e = "1" if preds.get("ph", {}).get("status", "normal") == "normal" else "0"
         f = "1" if preds.get("ldr", {}).get("status", "normal") == "normal" else "0"
 
         if serial_reader:
-            serial_reader.send_alert(f"a{a}b{b}c{c}d{d}e{e}f{f}g")
+            serial_reader.write(f"a{a}b{b}c{c}d{d}e{e}f{f}g")
         logger.info(f"[ARDUINO] {data.get('cattle_id', 'unknown')}: overall={'abnormal' if '0' in [a,b,c,d,e,f] else 'normal'}")
     except Exception as e:
         logger.error(f"Arduino data handling error: {e}")
@@ -160,8 +176,8 @@ def _try_arduino():
     global serial_reader
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "serial"))
-        from reader import SerialReader as SR
-        serial_reader = SR(fallback_port=settings.SERIAL_PORT)
+        from manager import SerialManager as SR
+        serial_reader = SR(fallback_port=settings.SERIAL_PORT, baudrate=settings.SERIAL_BAUDRATE)
         serial_reader.start(callback=handle_arduino_data)
         return True
     except Exception as e:
@@ -173,38 +189,15 @@ async def startup_event():
     global _main_loop
     _main_loop = asyncio.get_event_loop()  # capture FastAPI's loop for thread-safe scheduling
 
-    # ── SQLite column migration ──────────────────────────────────────────────
-    # create_all() won't add new columns to existing tables.
-    # Run ALTER TABLE … ADD COLUMN for each new field; SQLite silently
-    # errors if a column already exists, so we catch and ignore those.
-    _new_columns = [
-        ("breed",   "VARCHAR"),
-        ("age",     "VARCHAR"),
-        ("gender",  "VARCHAR"),
-        ("dob",     "VARCHAR"),
-        ("notes",   "TEXT"),
-        ("deleted", "BOOLEAN NOT NULL DEFAULT 0"),
-    ]
-    with engine.connect() as _conn:
-        for _col, _type in _new_columns:
-            try:
-                _conn.execute(
-                    __import__("sqlalchemy").text(
-                        f"ALTER TABLE cattle ADD COLUMN {_col} {_type}"
-                    )
-                )
-                _conn.commit()
-                logger.info(f"Migration: added column cattle.{_col}")
-            except Exception:
-                pass  # column already exists
-    # ────────────────────────────────────────────────────────────────────────
+
 
     db = SessionLocal()
     try:
-        if db.query(models.Cattle).count() == 0:
-            for cid, name in [("CATTLE-001", "Lakshmi"), ("CATTLE-002", "Ganga"), ("CATTLE-003", "Nandi")]:
-                db.add(models.Cattle(cattle_id=cid, name=name))
-            db.commit()
+        # Patch any rows where deleted is NULL (inserted before the migration added the column)
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("UPDATE cattle SET deleted = 0 WHERE deleted IS NULL"))
+            conn.commit()
     finally:
         db.close()
 
@@ -238,10 +231,29 @@ def get_arduino_status():
     return {
         "connected": False,
         "port": None,
-        "baudRate": settings.SERIAL_PORT_BAUDRATE if hasattr(settings, 'SERIAL_PORT_BAUDRATE') else 9600,
+        "baudRate": settings.SERIAL_BAUDRATE,
         "lastDataReceived": None,
         "status": "disconnected"
     }
+
+
+@app.post("/api/arduino/disconnect")
+def arduino_disconnect():
+    """Release COM port so Arduino IDE can upload a new sketch."""
+    global serial_reader
+    if serial_reader:
+        serial_reader.stop()
+        serial_reader = None
+    return {"status": "disconnected", "message": "COM port released. Safe to upload sketch."}
+
+@app.post("/api/arduino/reconnect")
+def arduino_reconnect():
+    """Re-attach to the Arduino after uploading a new sketch."""
+    global serial_reader
+    if serial_reader:
+        return {"status": "already_connected"}
+    success = _try_arduino()
+    return {"status": "connected" if success else "failed"}
 
 @app.post("/api/sensor/data")
 async def receive_sensor_data(request: Request):
@@ -256,7 +268,10 @@ def get_cattle(db: Session = Depends(get_db)):
 
 @app.get("/api/cows")
 def get_cows(db: Session = Depends(get_db)):
-    cattle_list = db.query(models.Cattle).filter(models.Cattle.deleted == False).all()
+    from sqlalchemy import or_
+    cattle_list = db.query(models.Cattle).filter(
+        or_(models.Cattle.deleted == False, models.Cattle.deleted == None)
+    ).all()
     results = []
     for c in cattle_list:
         reading = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == c.cattle_id).order_by(models.SensorReading.timestamp.desc()).first()
@@ -267,19 +282,27 @@ def get_cows(db: Session = Depends(get_db)):
         latest_feed = db.query(models.FeedConsumption).filter(models.FeedConsumption.cattle_id == c.cattle_id).order_by(models.FeedConsumption.date.desc()).first()
         latest_act = db.query(models.Activity).filter(models.Activity.cattle_id == c.cattle_id).order_by(models.Activity.date.desc()).first()
         active_alerts = db.query(models.Alert).filter(models.Alert.cattle_id == c.cattle_id, models.Alert.status == "active").count()
+        device = db.query(models.Device).filter(models.Device.cattle_id == c.cattle_id).first()
         results.append({
             "cattle_id": c.cattle_id,
             "name": c.name,
+            "photo": c.photo,
             "breed": c.breed,
             "age": c.age,
             "gender": c.gender,
-            "dob": c.dob,
+            "date_of_birth": c.dob,
+            "weight": c.weight,
+            "tag_id": c.tag_id,
+            "lactation_stage": c.lactation_stage,
+            "pregnancy_status": c.pregnancy_status,
             "notes": c.notes,
+            "medical_history": c.medical_history,
+            "device_id": device.device_id if device else None,
             "status": c.status,
             "latest_health": {
                 "timestamp": str(reading.timestamp) if reading else None,
                 "spo2": reading.spo2 if reading else None,
-                "bpm": reading.bpm if reading else None,
+                "heart_rate": reading.heart_rate if reading else None,
                 "temperature": reading.temperature if reading else None,
                 "overall_status": prediction.overall_status if prediction else None
             },
@@ -301,6 +324,64 @@ def get_cows(db: Session = Depends(get_db)):
         })
     return results
 
+@app.get("/api/cows/{cattle_id}")
+def get_cow(cattle_id: str, db: Session = Depends(get_db)):
+    from sqlalchemy import or_
+    c = db.query(models.Cattle).filter(
+        models.Cattle.cattle_id == cattle_id,
+        or_(models.Cattle.deleted == False, models.Cattle.deleted == None)
+    ).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="Cow not found")
+    reading = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == c.cattle_id).order_by(models.SensorReading.timestamp.desc()).first()
+    prediction = None
+    if reading:
+        prediction = db.query(models.Prediction).filter(models.Prediction.reading_id == reading.id).first()
+    latest_milk = db.query(models.MilkProduction).filter(models.MilkProduction.cattle_id == c.cattle_id).order_by(models.MilkProduction.date.desc()).first()
+    latest_feed = db.query(models.FeedConsumption).filter(models.FeedConsumption.cattle_id == c.cattle_id).order_by(models.FeedConsumption.date.desc()).first()
+    latest_act = db.query(models.Activity).filter(models.Activity.cattle_id == c.cattle_id).order_by(models.Activity.date.desc()).first()
+    active_alerts = db.query(models.Alert).filter(models.Alert.cattle_id == c.cattle_id, models.Alert.status == "active").count()
+    device = db.query(models.Device).filter(models.Device.cattle_id == c.cattle_id).first()
+    return {
+        "cattle_id": c.cattle_id,
+        "name": c.name,
+        "photo": c.photo,
+        "breed": c.breed,
+        "age": c.age,
+        "gender": c.gender,
+        "date_of_birth": c.dob,
+        "weight": c.weight,
+        "tag_id": c.tag_id,
+        "lactation_stage": c.lactation_stage,
+        "pregnancy_status": c.pregnancy_status,
+        "notes": c.notes,
+        "medical_history": c.medical_history,
+        "device_id": device.device_id if device else None,
+        "status": c.status,
+        "latest_health": {
+            "timestamp": str(reading.timestamp) if reading else None,
+            "spo2": reading.spo2 if reading else None,
+            "heart_rate": reading.heart_rate if reading else None,
+            "temperature": reading.temperature if reading else None,
+            "overall_status": prediction.overall_status if prediction else None
+        },
+        "latest_milk": {
+            "quantity": latest_milk.quantity if latest_milk else None,
+            "unit": latest_milk.unit if latest_milk else None,
+            "date": str(latest_milk.date) if latest_milk else None
+        },
+        "latest_feed": {
+            "quantity": latest_feed.quantity if latest_feed else None,
+            "unit": latest_feed.unit if latest_feed else None,
+            "date": str(latest_feed.date) if latest_feed else None
+        },
+        "latest_activity": {
+            "steps": latest_act.steps if latest_act else None,
+            "date": str(latest_act.date) if latest_act else None
+        },
+        "active_alerts_count": active_alerts
+    }
+
 @app.post("/api/cows", status_code=201)
 def create_cow(data: CowCreate, db: Session = Depends(get_db)):
     existing = db.query(models.Cattle).filter(models.Cattle.cattle_id == data.cattle_id).first()
@@ -309,48 +390,107 @@ def create_cow(data: CowCreate, db: Session = Depends(get_db)):
     cow = models.Cattle(
         cattle_id=data.cattle_id,
         name=data.name,
+        photo=data.photo,
         breed=data.breed,
         age=data.age,
         gender=data.gender,
-        dob=data.dob,
+        dob=data.date_of_birth,
+        weight=data.weight,
+        tag_id=data.tag_id,
+        lactation_stage=data.lactation_stage,
+        pregnancy_status=data.pregnancy_status,
         notes=data.notes,
+        medical_history=data.medical_history,
         status="normal",
         deleted=False
     )
     db.add(cow)
+    if data.device_id:
+        device = db.query(models.Device).filter(models.Device.device_id == data.device_id).first()
+        if device:
+            device.cattle_id = cow.cattle_id
+        else:
+            db.add(models.Device(device_id=data.device_id, cattle_id=cow.cattle_id, status="active"))
+
     db.commit()
     db.refresh(cow)
-    return {"cattle_id": cow.cattle_id, "name": cow.name, "breed": cow.breed,
-            "age": cow.age, "gender": cow.gender, "dob": cow.dob, "notes": cow.notes, "status": cow.status}
+    return {
+        "cattle_id": cow.cattle_id, "name": cow.name, "photo": cow.photo, "breed": cow.breed,
+        "age": cow.age, "gender": cow.gender, "date_of_birth": cow.dob, "weight": cow.weight,
+        "tag_id": cow.tag_id, "lactation_stage": cow.lactation_stage, "pregnancy_status": cow.pregnancy_status,
+        "notes": cow.notes, "medical_history": cow.medical_history, "status": cow.status,
+        "device_id": data.device_id,
+        "latest_health": None, "latest_milk": None, "latest_feed": None,
+        "latest_activity": None, "active_alerts_count": 0
+    }
 
 @app.put("/api/cows/{cattle_id}")
 def update_cow(cattle_id: str, data: CowUpdate, db: Session = Depends(get_db)):
-    cow = db.query(models.Cattle).filter(models.Cattle.cattle_id == cattle_id, models.Cattle.deleted == False).first()
+    from sqlalchemy import or_
+    cow = db.query(models.Cattle).filter(
+        models.Cattle.cattle_id == cattle_id,
+        or_(models.Cattle.deleted == False, models.Cattle.deleted == None)
+    ).first()
     if not cow:
         raise HTTPException(status_code=404, detail="Cow not found")
     if data.name is not None: cow.name = data.name
+    if data.photo is not None: cow.photo = data.photo
     if data.breed is not None: cow.breed = data.breed
     if data.age is not None: cow.age = data.age
     if data.gender is not None: cow.gender = data.gender
-    if data.dob is not None: cow.dob = data.dob
+    if data.date_of_birth is not None: cow.dob = data.date_of_birth
+    if data.weight is not None: cow.weight = data.weight
+    if data.tag_id is not None: cow.tag_id = data.tag_id
+    if data.lactation_stage is not None: cow.lactation_stage = data.lactation_stage
+    if data.pregnancy_status is not None: cow.pregnancy_status = data.pregnancy_status
     if data.notes is not None: cow.notes = data.notes
+    if data.medical_history is not None: cow.medical_history = data.medical_history
+    if data.device_id is not None:
+        # Unassign from old device if exists
+        old_device = db.query(models.Device).filter(models.Device.cattle_id == cow.cattle_id).first()
+        if old_device and old_device.device_id != data.device_id:
+            old_device.cattle_id = None
+        # Assign to new device
+        if data.device_id:
+            new_device = db.query(models.Device).filter(models.Device.device_id == data.device_id).first()
+            if new_device:
+                new_device.cattle_id = cow.cattle_id
+            else:
+                db.add(models.Device(device_id=data.device_id, cattle_id=cow.cattle_id, status="active"))
+
     db.commit()
     db.refresh(cow)
-    return {"cattle_id": cow.cattle_id, "name": cow.name, "breed": cow.breed,
-            "age": cow.age, "gender": cow.gender, "dob": cow.dob, "notes": cow.notes, "status": cow.status}
+    device = db.query(models.Device).filter(models.Device.cattle_id == cow.cattle_id).first()
+    return {
+        "cattle_id": cow.cattle_id, "name": cow.name, "photo": cow.photo, "breed": cow.breed,
+        "age": cow.age, "gender": cow.gender, "date_of_birth": cow.dob, "weight": cow.weight,
+        "tag_id": cow.tag_id, "lactation_stage": cow.lactation_stage, "pregnancy_status": cow.pregnancy_status,
+        "notes": cow.notes, "medical_history": cow.medical_history, "status": cow.status,
+        "device_id": device.device_id if device else None,
+        "latest_health": None, "latest_milk": None, "latest_feed": None,
+        "latest_activity": None, "active_alerts_count": 0
+    }
 
 @app.delete("/api/cows/{cattle_id}", status_code=204)
 def delete_cow(cattle_id: str, db: Session = Depends(get_db)):
-    cow = db.query(models.Cattle).filter(models.Cattle.cattle_id == cattle_id).first()
+    from sqlalchemy import or_
+    cow = db.query(models.Cattle).filter(
+        models.Cattle.cattle_id == cattle_id,
+        or_(models.Cattle.deleted == False, models.Cattle.deleted == None)
+    ).first()
     if not cow:
         raise HTTPException(status_code=404, detail="Cow not found")
-    cow.deleted = True  # soft delete — keeps all sensor/health/milk data intact
+    cow.deleted = True  # soft delete - keeps all sensor/health/milk data intact
     db.commit()
     return None
 
 @app.get("/api/cows/{cattle_id}")
 def get_cow_by_id(cattle_id: str, db: Session = Depends(get_db)):
-    c = db.query(models.Cattle).filter(models.Cattle.cattle_id == cattle_id, models.Cattle.deleted == False).first()
+    from sqlalchemy import or_
+    c = db.query(models.Cattle).filter(
+        models.Cattle.cattle_id == cattle_id,
+        or_(models.Cattle.deleted == False, models.Cattle.deleted == None)
+    ).first()
     if not c:
         raise HTTPException(status_code=404, detail="Cow not found")
     reading = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == c.cattle_id).order_by(models.SensorReading.timestamp.desc()).first()
@@ -373,7 +513,7 @@ def get_cow_by_id(cattle_id: str, db: Session = Depends(get_db)):
         "latest_health": {
             "timestamp": str(reading.timestamp) if reading else None,
             "spo2": reading.spo2 if reading else None,
-            "bpm": reading.bpm if reading else None,
+            "heart_rate": reading.heart_rate if reading else None,
             "temperature": reading.temperature if reading else None,
             "humidity": reading.humidity if reading else None,
             "ph": reading.ph if reading else None,
@@ -409,7 +549,7 @@ def get_latest_reading(cattle_id: str, db: Session = Depends(get_db)):
         "cattle_id": reading.cattle_id,
         "timestamp": str(reading.timestamp),
         "spo2": reading.spo2,
-        "bpm": reading.bpm,
+        "heart_rate": reading.heart_rate,
         "temperature": reading.temperature,
         "humidity": reading.humidity,
         "mems_x": reading.mems_x,
@@ -420,7 +560,7 @@ def get_latest_reading(cattle_id: str, db: Session = Depends(get_db)):
         "fall_detected": fall_detected,
         "health": {
             "spo2": prediction.spo2_status if prediction else "unknown",
-            "bpm": prediction.bpm_status if prediction else "unknown",
+            "heart_rate": prediction.heart_rate_status if prediction else "unknown",
             "temperature": prediction.temperature_status if prediction else "unknown",
             "mems": prediction.mems_status if prediction else "unknown",
             "ph": prediction.ph_status if prediction else "unknown",
@@ -439,7 +579,7 @@ def get_history(cattle_id: str, limit: int = Query(default=20), db: Session = De
         result.append({
             "timestamp": str(r.timestamp),
             "spo2": r.spo2,
-            "bpm": r.bpm,
+            "heart_rate": r.heart_rate,
             "temperature": r.temperature,
             "humidity": r.humidity,
             "mems_x": r.mems_x,
@@ -450,7 +590,7 @@ def get_history(cattle_id: str, limit: int = Query(default=20), db: Session = De
             "fall_detected": fall_detected,
             "health": {
                 "spo2": prediction.spo2_status if prediction else "unknown",
-                "bpm": prediction.bpm_status if prediction else "unknown",
+                "heart_rate": prediction.heart_rate_status if prediction else "unknown",
                 "temperature": prediction.temperature_status if prediction else "unknown",
                 "mems": prediction.mems_status if prediction else "unknown",
                 "ph": prediction.ph_status if prediction else "unknown",
@@ -471,7 +611,7 @@ def get_alerts(db: Session = Depends(get_db)):
         details = []
         if fall_detected: details.append(f"Fall Detected (X:{reading.mems_x or 0:.2f} Y:{reading.mems_y or 0:.2f} Z:{reading.mems_z or 0:.2f})" if reading else "Fall Detected")
         if p.spo2_status == "abnormal": details.append(f"SpO2 abnormal ({reading.spo2}%)" if reading else "SpO2 abnormal")
-        if p.bpm_status == "abnormal": details.append(f"BPM abnormal ({reading.bpm})" if reading else "BPM abnormal")
+        if p.heart_rate_status == "abnormal": details.append(f"Heart Rate abnormal ({reading.heart_rate})" if reading else "Heart Rate abnormal")
         if p.temperature_status == "abnormal": details.append(f"Temp abnormal ({reading.temperature}°C)" if reading else "Temp abnormal")
         if p.ph_status == "abnormal": details.append(f"pH abnormal ({reading.ph})" if reading else "pH abnormal")
         if p.ldr_status == "abnormal": details.append(f"Light abnormal ({reading.ldr} lux)" if reading else "Light abnormal")
@@ -494,10 +634,10 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     healthy_cows = 0
     attention_cows = 0
     
-    bpm_sum = 0
+    heart_rate_sum = 0
     spo2_sum = 0
     temp_sum = 0
-    bpm_count = 0
+    heart_rate_count = 0
     spo2_count = 0
     temp_count = 0
     
@@ -514,9 +654,9 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
             
         reading = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == c.cattle_id).order_by(models.SensorReading.timestamp.desc()).first()
         if reading:
-            if reading.bpm is not None:
-                bpm_sum += reading.bpm
-                bpm_count += 1
+            if reading.heart_rate is not None:
+                heart_rate_sum += reading.heart_rate
+                heart_rate_count += 1
             if reading.spo2 is not None:
                 spo2_sum += reading.spo2
                 spo2_count += 1
@@ -537,7 +677,7 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         "total_cows": cattle_count,
         "healthy_cows": healthy_cows,
         "attention_cows": attention_cows,
-        "average_bpm": round(bpm_sum / bpm_count, 1) if bpm_count > 0 else None,
+        "average_heart_rate": round(heart_rate_sum / heart_rate_count, 1) if heart_rate_count > 0 else None,
         "average_spo2": round(spo2_sum / spo2_count, 1) if spo2_count > 0 else None,
         "average_temperature": round(temp_sum / temp_count, 1) if temp_count > 0 else None,
         "total_milk_today": round(total_milk, 2),

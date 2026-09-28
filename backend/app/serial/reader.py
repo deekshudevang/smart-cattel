@@ -6,7 +6,7 @@ import threading
 from datetime import datetime
 
 class SerialReader:
-    def __init__(self, fallback_port="COM4", baudrate=9600):
+    def __init__(self, fallback_port="COM6", baudrate=9600):
         self.fallback_port = fallback_port
         self.baudrate = baudrate
         self.ser = None
@@ -91,7 +91,7 @@ class SerialReader:
         print(f"\n[{self.port}] Arduino connected")
         print(f"\n[{time_str}] SENSOR DATA")
         
-        hr = data.get("bpm", "N/A")
+        hr = data.get("heart_rate", "N/A")
         spo2 = data.get("spo2", "N/A")
         temp = data.get("temperature", "N/A")
         ph = data.get("ph", "N/A")
@@ -125,6 +125,8 @@ class SerialReader:
                 if line.startswith('{'):
                     try:
                         data = json.loads(line)
+                        if "bpm" in data:
+                            data["heart_rate"] = data.pop("bpm")
                         self.last_data_received = datetime.now()
                         self._format_terminal_data(data)
                         if self.on_data_callback:

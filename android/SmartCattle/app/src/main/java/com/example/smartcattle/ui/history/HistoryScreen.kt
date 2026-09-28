@@ -30,7 +30,7 @@ private val Grey    = Color(0xFF8899AA)
 private val Border  = Color(0xFF1E3050)
 
 // Column headers shown in the table
-private val HEADERS = listOf("Time", "SpO2%", "BPM", "Temp°C", "Hum%", "pH", "Fall", "Status")
+private val HEADERS = listOf("Time", "SpO2%", "Heart Rate", "Temp°C", "Hum%", "pH", "Fall", "Status")
 
 @Composable
 fun HistoryScreen(viewModel: CattleViewModel) {
@@ -134,7 +134,7 @@ private fun rowCells(r: HistoryRow): List<String> {
     return listOf(
         ts,
         r.spo2.toString(),
-        r.bpm.toString(),
+        r.heart_rate.toString(),
         String.format(Locale.US, "%.1f", r.temperature),
         String.format(Locale.US, "%.0f", r.humidity),
         String.format(Locale.US, "%.1f", r.ph),

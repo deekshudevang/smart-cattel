@@ -2,7 +2,7 @@ package com.example.smartcattle.data.model
 
 data class HealthStatus(
     val spo2: String = "unknown",
-    val bpm: String = "unknown",
+    val heart_rate: String = "unknown",
     val temperature: String = "unknown",
     val mems: String = "unknown",
     val ph: String = "unknown",
@@ -14,7 +14,7 @@ data class SensorData(
     val cattleId: String,
     val timestamp: String = "",
     val spo2: Int?,
-    val bpm: Int?,
+    val heart_rate: Int?,
     val temperature: Float?,
     val humidity: Float?,
     val memsX: Float?,
@@ -31,7 +31,7 @@ data class SensorData(
 data class HistoryRow(
     val timestamp: String,
     val spo2: Int?,
-    val bpm: Int?,
+    val heart_rate: Int?,
     val temperature: Float?,
     val humidity: Float?,
     val memsX: Float?,
