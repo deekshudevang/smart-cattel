@@ -8,143 +8,127 @@
 Traditional cattle monitoring relies on manual observation, which is labor-intensive and often detects diseases too late. This project provides a real-time, non-invasive, IoT-based wearable monitoring system that tracks the vital signs of cattle, detects anomalies using Machine Learning, and immediately alerts farmers through a modern Android application.
 
 ## ✨ Features
-- **Real-time IoT Telemetry:** Live transmission of SpO2, BPM, temperature, pH, LDR, and 3-axis accelerometer data.
-- **Machine Learning Inference:** A deployed Scikit-Learn Random Forest pipeline predicts health risks instantly.
+- **Real-time IoT Telemetry:** Live streaming of SpO2, BPM, temperature, pH, LDR, 3-axis accelerometer data, and step counting over 9600 baud serial.
+- **Authoritative Step Counting:** Wear-leveled persistent lifetime steps on Arduino EEPROM paired with backend-authoritative daily rollover at midnight in the configured timezone (`TIMEZONE=Asia/Kolkata`).
+- **Counter Anomaly Protection:** Reboots, reconnects, power-loss baseline resets, and duplicate packets are reconciled without data loss or negative totals.
+- **Independent Partial Field Validation:** Malformed or uncontacted sensors output `null` without invalidating remaining valid sensors or fabricating fake values.
+- **Checksum Integrity:** 8-bit streaming XOR checksum on serial lines to eliminate UART transmission corruptions.
+- **Machine Learning Inference:** Deployed Scikit-Learn Random Forest pipeline predicts health risks instantly.
 - **Baseline & Analytics Engine:** Individual historical baselines for each cow across multiple time windows (1h, 6h, 24h, 7d) for personalized deviation tracking.
 - **Health Risk Assessment:** Dedicated service combining sensor validity, ML output, and baseline deviations to generate explainable risk scores (NORMAL, WATCH, WARNING, CRITICAL).
-- **Alert Management:** Robust alert deduplication, cooldowns, and severity tracking (INFO, WARNING, CRITICAL) for ongoing conditions.
-- **Jetpack Compose Android Client:** A sleek, modern app featuring WebSocket integration with automatic reconnection, live data, semantic sensor states (VALID, STALE, OFFLINE), and historical charts.
+- **Alert Management:** Robust alert deduplication, cooldowns, and severity tracking (INFO, WARNING, CRITICAL).
+- **Jetpack Compose Android Client:** Material 3 app with WebSocket live streaming, offline caching, configurable IP settings, and WCAG AA contrast.
 - **Bi-directional Communication:** Backend pushes updates to Android while simultaneously sending hardware trigger alerts back to the Arduino (for local LCD/SMS feedback).
 
 ## 🏗️ System Architecture
 
-The architecture relies on a robust separation of concerns:
-
-1. **IoT Edge Node (Arduino Mega):** Collects raw sensor data, processes pulse oximetry signals via DSP filters, constructs JSON, and transmits via Serial/GSM.
-2. **Backend Server (FastAPI):** Ingests serial data, parses JSON, performs database CRUD (SQLite/PostgreSQL), runs ML prediction models, and broadcasts results.
-3. **Android App (Kotlin MVVM):** Connects to the backend WebSocket (`ws://<ip>:8000/ws/cattle/CATTLE-ALL`) for zero-latency UI updates.
-
 ```mermaid
-graph TD
-    subgraph Edge Node
-    Sensors[DHT11, MAX30105, ADXL345, pH, LDR] -->|I2C/Analog| Arduino[Arduino Mega 2560]
-    Arduino -->|JSON via Serial/GSM| FastAPI
+flowchart TD
+    subgraph IoT Edge Node
+    Sensors["Sensors (ADXL345, MAX30102, DHT11, pH, LDR)"] -->|I2C / ADC / UART| Arduino["Arduino Mega 2560\n(Non-blocking loop, EEPROM steps)"]
+    Arduino -->|Streaming JSON + XOR Checksum\nCOM10 @ 9600 baud| SerialMgr
     end
-    
-    subgraph Backend
-    FastAPI[FastAPI Server] <--> DB[(SQLite/PostgreSQL)]
-    FastAPI <--> ML[Random Forest Models]
+
+    subgraph Backend Server
+    SerialMgr["Serial Port Manager\n(Single Port Owner)"] --> Validator["Telemetry Validator\n(Partial-field nullification)"]
+    Validator --> StepMgr["Authoritative Step Manager\n(Daily Rollover & Anomaly Protection)"]
+    StepMgr --> DB[(SQLite Database\nsmart_cattle.db)]
+    StepMgr --> ML["ML Prediction & Alert Engine"]
+    ML --> WS["WebSocket Hub\n(/ws/cattle/CATTLE-ALL)"]
     end
-    
-    subgraph Client
-    FastAPI == WebSocket ==> Android[Android App]
-    FastAPI -.->|Alert Flags| Arduino
+
+    subgraph Android Client
+    WS ==> Android["Android App (Jetpack Compose)\nStateFlow + Room Offline Cache"]
+    Android -->|REST Config / Deletion| BackendAPI["FastAPI REST Routes"]
     end
 ```
 
 ## 🔌 Sensor Wiring Guide & Communication Architecture
 
-*Note: Previous versions incorrectly placed GSM and GPS on the same SoftwareSerial pins. The Mega 2560 has multiple hardware serials, which guarantees robust, non-blocking communication.*
-
 | Sensor / Module | Arduino Mega Pin | Function |
-|-----------------|------------------|----------|
-| **MAX30105**    | I2C (SDA 20, SCL 21) | SpO2 & Heart Rate |
-| **ADXL345**     | I2C (SDA 20, SCL 21) | 3-axis acceleration (Fall detection) |
-| **DHT11**       | D42              | Temperature & Humidity |
-| **pH Sensor**   | Serial3 (RX 15, TX 14)| pH level of local environment/feed |
-| **LDR Sensor**  | A2               | Light intensity (Milk adulteration check) |
-| **GPS NEO-6M**  | **Serial1** (RX 19, TX 18)| Geolocation telemetry (Updated) |
-| **GSM SIM900A** | **Serial2** (RX 17, TX 16)| SMS emergency alerts (Updated) |
-| **LCD 16x2**    | D30, 32, 34, 36, 38, 40 | Local hardware status display |
+|---|---|---|
+| **MAX30105 / MAX30102** | I2C (SDA 20, SCL 21) | SpO2 & Heart Rate |
+| **ADXL345** | I2C (SDA 20, SCL 21) | 3-axis acceleration & Step Detection |
+| **DHT11** | D42 | Temperature & Humidity |
+| **pH Sensor** | Serial3 (RX 15, TX 14) | pH level of water/feed |
+| **LDR Sensor** | A2 | Ambient light intensity |
+| **GPS NEO-6M** | **Serial1** (RX 19, TX 18) | Geolocation telemetry |
+| **GSM SIM900A** | **Serial2** (RX 17, TX 16) | SMS emergency alerts |
+| **LCD 16x2** | D30, 32, 34, 36, 38, 40 | Local hardware status display |
 
-> **⚠️ MAX30102 Limitations for Veterinary Use:**
-> The MAX30102 (and MAX30105) is designed for human fingertips with thin, relatively translucent skin. When used on cattle, the sensor faces significant challenges: thick hide, dark pigmentation, and dense hair can severely attenuate the optical signal, leading to weak or completely obstructed IR and Red light reflection. Consequently, readings are heavily dependent on sensor placement (e.g., shaved areas, ear, or under the tail) and consistent contact pressure. **Do not claim medical accuracy.** This system is strictly for experimental/observational monitoring and should not replace professional veterinary diagnostics.
+> **⚠️ Veterinary Limitations Disclaimer:**
+> - MAX30102 pulse oximetry requires direct skin/vein contact. On cattle with thick hide and dark hair, readings require suitable sensor placement (e.g. inner ear, tail base) and will output `null` / `"Not Available"` when hide contact is lost.
+> - Step detection thresholds and health risk alert rules are configurable defaults. Step accuracy during real cow walking and clinical alert limits are marked **UNVERIFIED** until evaluated in field trials with a certified veterinarian.
 
-## 🧠 Machine Learning Methodology
+---
 
-The core intelligence of the system is powered by an ensemble of Random Forest classifiers.
+## 🛠️ Setup & Execution Guide
 
-- **Dataset:** Time-series telemetry gathered from live cattle monitoring, containing columns for `SpO2`, `BPM`, `Temperature`, `Movement (Mems_X)`, `pH`, and `LDR`.
-- **Features:** 6 continuous numerical features normalized using `StandardScaler`.
-- **Methodology:** 6 independent Random Forest Classifiers (`n_estimators=100`, `max_depth=10`), each trained to flag anomalies for a specific physiological trait (0 = Abnormal, 1 = Normal).
-- **Validation:** 80/20 Train-Test split achieving >94% F1-Score on anomaly detection.
-- **Fail-safes:** The `PredictionService` is built to gracefully handle missing models or `NaN` inputs, falling back to heuristic thresholding if inference fails.
+### 1. Arduino Mega Firmware
+1. Open `arduino/arduino.ino` in Arduino IDE or compile via `arduino-cli`:
+   ```bash
+   arduino-cli compile --fqbn arduino:avr:mega arduino
+   arduino-cli upload -p COM10 --fqbn arduino:avr:mega arduino
+   ```
+2. **Important COM Port Rule:** Close the Arduino Serial Monitor before starting the FastAPI backend. Only one application can own the serial port at a time.
 
-## 🛠️ Complete Installation Flow
+### 2. FastAPI Backend
+1. Python 3.9+ is required.
+2. Setup environment and install dependencies:
+   ```bash
+   python -m venv venv
+   .\venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+3. Configure `.env`:
+   ```ini
+   SERIAL_PORT=COM10
+   SERIAL_BAUDRATE=9600
+   HARDWARE_MODE=real
+   ALLOW_SIMULATION=false
+   TIMEZONE=Asia/Kolkata
+   ```
+4. Start backend:
+   ```bash
+   START_BACKEND.bat
+   ```
+   Or via command line:
+   ```bash
+   python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+   ```
 
-### 1. Backend Environment Configuration (Development vs Production)
-You must have Python 3.9+ installed.
+### 3. Finding Computer LAN IP & Android Setup
+1. On the PC running FastAPI, run `ipconfig` in Command Prompt or PowerShell and look for **IPv4 Address** (e.g., `192.168.1.5`).
+2. In the Android App, click the **Settings icon** on the top bar.
+3. Enter your PC's LAN IP (e.g., `192.168.1.5`). The app connects immediately to `ws://192.168.1.5:8000/ws/cattle/CATTLE-ALL`.
 
+---
+
+## 🧪 Testing & Verification
+
+Run the full cross-layer automated test suites using `RUN_TESTS.bat`:
 ```bash
-# Clone the repository
-git clone https://github.com/deekshudevang/smart-cattel.git
-cd smart-cattel
-
-# Create virtual environment and install dependencies
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
-
-# Configure environment variables
-cp .env.example .env
-# Edit .env with your specific COM port (e.g., ARDUINO_PORT=COM4)
+RUN_TESTS.bat
 ```
+Or run individually:
+- **Backend Tests (54 tests):**
+  ```bash
+  cd backend
+  .\venv\Scripts\pytest.exe -v
+  ```
+- **Android Unit Tests:**
+  ```bash
+  cd android\SmartCattle
+  .\gradlew.bat test
+  ```
 
-**Development Mode:**
-```bash
-python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
-```
+---
 
-**Production Mode:**
-To deploy in a production environment (e.g., AWS EC2, DigitalOcean), set `ENVIRONMENT=production` in your `.env` to engage PostgreSQL, then run with Gunicorn:
-```bash
-gunicorn -k uvicorn.workers.UvicornWorker backend.app.main:app -w 4 -b 0.0.0.0:8000
-```
-*Health Check:* Production load balancers can verify system uptime via `GET /health`.
-
-### 2. ML Pipeline Configuration
-The system uses pre-trained Scikit-Learn `.pkl` models located in `ml/models/`. 
-To retrain the models with new datasets:
-```bash
-python ml/training/train.py
-```
-
-### 3. Arduino Setup
-1. Open `arduino/arduino.ino` in the Arduino IDE.
-2. Install required libraries: `MAX30105`, `TinyGPS++`, `DHT sensor library`, `Adafruit ADXL345`.
-3. Select **Arduino Mega 2560** as the target board.
-4. Upload the firmware.
-
-### 4. Android App Installation
-1. Open the `android/SmartCattle` folder in Android Studio.
-2. Allow Gradle to sync dependencies.
-3. Build and Run on a physical device or emulator.
-4. **Important:** In the app, click the **Settings icon** to configure the IP address (Enter the local IPv4 address of the computer running your FastAPI backend).
-
-## 📡 API Usage & Database Structure
-
-### Database Tables (SQLite)
-- `users`: Standard auth tables (id, email, hashed_password)
-- `cattle`: Cattle registry (id, tag_number, breed, age)
-- `sensor_readings`: Timeseries data (id, cattle_id, spo2, bpm, temp, mems, ph, ldr, timestamp, overall_health)
-
-### Key REST Endpoints
-- `GET /api/cattle/` - List all registered cattle.
-- `GET /api/cattle/{id}/latest` - Retrieve the latest sensor reading for a specific cow.
-- `GET /api/cattle/{id}/history` - Retrieve the time-series history for charts.
-- `WS /ws/cattle/{id}` - Live WebSocket feed for 100ms UI updates.
-
-## 🐛 Troubleshooting
-- **`ModuleNotFoundError` during startup:** Ensure you have activated your virtual environment before running the backend.
-- **Android App not showing data:** Check that the phone and laptop are on the same Wi-Fi network. Use `ipconfig` (Windows) to verify the IP entered in the app settings.
-- **Serial Port Error:** Check if the Arduino IDE Serial Monitor is open. Only one program can access the COM port at a time. Close the Arduino IDE Serial Monitor before running the backend.
+## 📄 Documentation Links
+- [Telemetry Schema & Step Counting Specification](docs/TELEMETRY_SCHEMA.md)
+- [System Architecture](docs/ARCHITECTURE.md)
+- [Hardware Test Report](docs/HARDWARE_TEST_REPORT.md)
+- [Configuration Guide](docs/CONFIGURATION.md)
 
 ## 📜 License
-Distributed under the MIT License. See `LICENSE` for more information.
-
-## 📊 Code Audit & System Mismatches
-During a recent comprehensive architecture audit:
-- The system correctly maps `bpm` (from Arduino) to `heart_rate` in the backend.
-- Invalid or missing sensor data is passed securely as `null` through the WebSocket and preserved without fallback padding.
-- API structure remains strictly separated: `/api/cattle/...` for REST fetching and `/ws/cattle/...` for high-frequency updates.
-- Real hardware components are strictly verified avoiding mock sensors for critical telemetry.
+Distributed under the MIT License.

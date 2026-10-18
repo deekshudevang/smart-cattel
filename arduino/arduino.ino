@@ -155,6 +155,132 @@ void i2c_scan() {
   }
 }
 
+// ---------- Non-blocking Serial Checksum Print ----------
+class ChecksumPrint : public Print {
+public:
+  Print &target;
+  uint8_t checksum;
+  ChecksumPrint(Print &p) : target(p), checksum(0) {}
+  size_t write(uint8_t c) override {
+    checksum ^= c;
+    return target.write(c);
+  }
+};
+
+// ---------- Non-blocking GSM SMS State Machine ----------
+enum GsmState {
+  GSM_IDLE,
+  GSM_SEND_AT,
+  GSM_WAIT_AT,
+  GSM_SEND_CMGF,
+  GSM_WAIT_CMGF,
+  GSM_SEND_CMGS,
+  GSM_WAIT_CMGS,
+  GSM_SEND_BODY,
+  GSM_WAIT_BODY,
+  GSM_SEND_CTRLZ,
+  GSM_WAIT_SEND
+};
+
+GsmState gsm_state = GSM_IDLE;
+unsigned long gsm_state_start = 0;
+String gsm_pending_msg = "";
+
+void queueSMS(const String &msg) {
+  if (millis() - last_sms_time < SMS_COOLDOWN && last_sms_time != 0) {
+    Serial.println(F("{\"event\":\"sms_delivery\",\"status\":\"cooldown\",\"message\":\"Skipped due to cooldown\"}"));
+    return;
+  }
+  if (gsm_state != GSM_IDLE) {
+    return; // Already busy sending an SMS
+  }
+  gsm_pending_msg = msg;
+  gsm_state = GSM_SEND_AT;
+  gsm_state_start = millis();
+}
+
+void updateGSM(unsigned long now_ms) {
+  switch (gsm_state) {
+    case GSM_IDLE:
+      break;
+    case GSM_SEND_AT:
+      GSM_SERIAL.println("AT");
+      gsm_state = GSM_WAIT_AT;
+      gsm_state_start = now_ms;
+      break;
+    case GSM_WAIT_AT:
+      if (now_ms - gsm_state_start >= 1000) {
+        gsm_state = GSM_SEND_CMGF;
+      }
+      break;
+    case GSM_SEND_CMGF:
+      GSM_SERIAL.println("AT+CMGF=1");
+      gsm_state = GSM_WAIT_CMGF;
+      gsm_state_start = now_ms;
+      break;
+    case GSM_WAIT_CMGF:
+      if (now_ms - gsm_state_start >= 500) {
+        gsm_state = GSM_SEND_CMGS;
+      }
+      break;
+    case GSM_SEND_CMGS:
+      GSM_SERIAL.print("AT+CMGS=\"");
+      GSM_SERIAL.print(SMS_PHONE_NUMBER);
+      GSM_SERIAL.println("\"");
+      gsm_state = GSM_WAIT_CMGS;
+      gsm_state_start = now_ms;
+      break;
+    case GSM_WAIT_CMGS:
+      if (now_ms - gsm_state_start >= 500) {
+        gsm_state = GSM_SEND_BODY;
+      }
+      break;
+    case GSM_SEND_BODY:
+      GSM_SERIAL.print("ALERT: ");
+      GSM_SERIAL.println(gsm_pending_msg);
+      GSM_SERIAL.print("CATTLE ID: ");
+      GSM_SERIAL.println(CATTLE_ID);
+      if (gps.location.isValid()) {
+        GSM_SERIAL.println("Location: https://maps.google.com/?q=" + LAT + "," + LON);
+      } else {
+        GSM_SERIAL.println("Location: GPS signal lost.");
+      }
+      gsm_state = GSM_WAIT_BODY;
+      gsm_state_start = now_ms;
+      break;
+    case GSM_WAIT_BODY:
+      if (now_ms - gsm_state_start >= 300) {
+        gsm_state = GSM_SEND_CTRLZ;
+      }
+      break;
+    case GSM_SEND_CTRLZ:
+      GSM_SERIAL.write(26); // ASCII SUB / Ctrl+Z
+      gsm_state = GSM_WAIT_SEND;
+      gsm_state_start = now_ms;
+      break;
+    case GSM_WAIT_SEND:
+      if (now_ms - gsm_state_start >= 3000) {
+        last_sms_time = now_ms;
+        Serial.print(F("{\"event\":\"sms_delivery\",\"status\":\"attempted\",\"message\":\""));
+        Serial.print(gsm_pending_msg);
+        Serial.println(F("\"}"));
+        gsm_pending_msg = "";
+        gsm_state = GSM_IDLE;
+      }
+      break;
+  }
+}
+
+// ---------- Non-blocking Alert LCD State ----------
+String lcd_alert_msg = "";
+unsigned long lcd_alert_until = 0;
+
+void triggerAlertDisplay(const String &msg) {
+  lcd_alert_msg = msg;
+  lcd_alert_until = millis() + 3000;
+  queueSMS(msg);
+}
+
 void setup() {
   Serial.begin(9600);
   GPS_SERIAL.begin(9600);
@@ -231,6 +357,9 @@ void setup() {
 }
 
 void loop() {
+  // Update non-blocking GSM SMS transmission
+  updateGSM(millis());
+
   // ---------- ADXL345 Continuous Sampling (~25Hz / 40ms) & Auto-Reconnection ----------
   static unsigned long last_adxl_probe = 0;
   if (!adxl_valid && millis() - last_adxl_probe >= 4000) {
@@ -254,6 +383,7 @@ void loop() {
       accel.getEvent(&event);
       xValue = event.acceleration.x;
       yValue = event.acceleration.y;
+      zValue = event.acceleration.z; // Capture real Z-axis acceleration
       if (step_counter.processSample(xValue, yValue, zValue, millis())) {
         Serial.print(F("[STEP] Step detected! Ax="));
         Serial.print(xValue, 2);
@@ -499,161 +629,175 @@ void loop() {
     lcd_showing_waiting = false;
     lcd.clear();
     lcd.setCursor(0, 0);
-    
-    if (show_page_1) {
-      lcd.print("S:");
-      if (max_valid && finger_detected && displaySpO2 > 0) lcd.print(displaySpO2);
-      else lcd.print("--");
+
+    // Physiological validity checks
+    bool accel_ok = adxl_valid;
+    bool hr_ok    = max_valid && finger_detected && displayBPMValid && (displayBPM >= 30 && displayBPM <= 220);
+    bool spo2_ok  = max_valid && finger_detected && displaySpO2Valid && (displaySpO2 >= 50 && displaySpO2 <= 100);
+    bool temp_ok  = dht_valid && (!isnan(temperature)) && (temperature >= -10.0f && temperature <= 60.0f);
+    bool ph_ok    = ph_valid && (ph_value >= 0.0f && ph_value <= 14.0f);
+    bool ldr_ok   = ldr_valid && (ldrValue >= 0 && ldrValue <= 1023);
+
+    if (millis() < lcd_alert_until && lcd_alert_msg.length() > 0) {
+      lcd.print(F("! HEALTH ALERT !"));
+      lcd.setCursor(0, 1);
+      lcd.print(lcd_alert_msg);
+    } else if (show_page_1) {
+      lcd.print(F("S:"));
+      if (spo2_ok && displaySpO2 > 0) lcd.print(displaySpO2);
+      else lcd.print(F("N/A"));
       
-      lcd.print(" B:");
-      if (max_valid && finger_detected && displayBPM > 0) lcd.print(displayBPM);
-      else lcd.print("--");
+      lcd.print(F(" B:"));
+      if (hr_ok && displayBPM > 0) lcd.print(displayBPM);
+      else lcd.print(F("N/A"));
       
-      lcd.print(" T:");
-      if (dht_valid) lcd.print((int)temperature);
-      else lcd.print("--");
+      lcd.print(F(" T:"));
+      if (temp_ok) lcd.print((int)temperature);
+      else lcd.print(F("N/A"));
 
       lcd.setCursor(0, 1);
-      lcd.print("ST:");
+      lcd.print(F("ST:"));
       lcd.print(step_counter.steps_today);
       
-      lcd.print(" p:");
-      if (ph_valid) lcd.print(ph_value, 1);
-      else lcd.print("--");
+      lcd.print(F(" p:"));
+      if (ph_ok) lcd.print(ph_value, 1);
+      else lcd.print(F("N/A"));
       
-      lcd.print(" L:");
-      if (ldr_valid) {
+      lcd.print(F(" L:"));
+      if (ldr_ok) {
         int dispLdr = ldrValue > 999 ? 999 : ldrValue;
         lcd.print(dispLdr);
       }
-      else lcd.print("--");
+      else lcd.print(F("N/A"));
+      show_page_1 = !show_page_1;
     } else {
-      lcd.print("Steps:");
+      lcd.print(F("Steps:"));
       lcd.print(step_counter.steps_today);
-      lcd.print(" Tot:");
+      lcd.print(F(" Tot:"));
       lcd.print(step_counter.steps_lifetime);
       
       lcd.setCursor(0, 1);
-      lcd.print("X:");
-      if (adxl_valid) lcd.print(xValue, 1);
-      else lcd.print("--");
-      lcd.print(" Y:");
-      if (adxl_valid) lcd.print(yValue, 1);
-      else lcd.print("--");
-      lcd.print(" Z:");
-      if (adxl_valid) lcd.print(zValue, 1);
-      else lcd.print("--");
+      lcd.print(F("X:"));
+      if (accel_ok) lcd.print(xValue, 1);
+      else lcd.print(F("N/A"));
+      lcd.print(F(" Y:"));
+      if (accel_ok) lcd.print(yValue, 1);
+      else lcd.print(F("N/A"));
+      lcd.print(F(" Z:"));
+      if (accel_ok) lcd.print(zValue, 1);
+      else lcd.print(F("N/A"));
+      show_page_1 = !show_page_1;
     }
-    show_page_1 = !show_page_1;
 
-    // 2. Build Standardized JSON Telemetry
+    // 2. Build Standardized JSON Telemetry with Checksum
     static unsigned long sequence_counter = 0;
     sequence_counter++;
 
-    bool hr_ok   = max_valid && finger_detected && displayBPMValid;
-    bool spo2_ok = max_valid && finger_detected && displaySpO2Valid;
     if (!max_valid) displayState = "NO_SENSOR";
 
-    Serial.print("{");
-    Serial.print("\"protocol_version\":1,");
-    Serial.print("\"cattle_id\":\""); Serial.print(CATTLE_ID); Serial.print("\",");
-    Serial.print("\"device_id\":\"SC-001\",");
-    Serial.print("\"sequence\":"); Serial.print(sequence_counter); Serial.print(",");
-    Serial.print("\"timestamp\":"); Serial.print(millis()); Serial.print(",");
-    Serial.print("\"device_connected\":true,");
+    ChecksumPrint cp(Serial);
+    cp.print(F("{\"protocol_version\":1,"));
+    cp.print(F("\"cattle_id\":\"")); cp.print(CATTLE_ID); cp.print(F("\","));
+    cp.print(F("\"device_id\":\"SC-001\","));
+    cp.print(F("\"boot_count\":")); cp.print(step_counter.boot_count); cp.print(F(","));
+    cp.print(F("\"sequence\":")); cp.print(sequence_counter); cp.print(F(","));
+    cp.print(F("\"timestamp\":")); cp.print(millis()); cp.print(F(","));
+    cp.print(F("\"device_connected\":true,"));
 
     // Steps (today & lifetime)
-    Serial.print("\"step_count_today\":"); Serial.print(step_counter.steps_today); Serial.print(",");
-    Serial.print("\"step_count_lifetime\":"); Serial.print(step_counter.steps_lifetime); Serial.print(",");
+    cp.print(F("\"step_count_today\":")); cp.print(step_counter.steps_today); cp.print(F(","));
+    cp.print(F("\"step_count_lifetime\":")); cp.print(step_counter.steps_lifetime); cp.print(F(","));
 
     // Accelerometer / MEMS (ADXL345)
-    Serial.print("\"accelerometer_valid\":"); Serial.print(adxl_valid ? "true," : "false,");
-    if (adxl_valid) {
-      Serial.print("\"acceleration_x\":"); Serial.print(xValue, 2); Serial.print(",");
-      Serial.print("\"acceleration_y\":"); Serial.print(yValue, 2); Serial.print(",");
-      Serial.print("\"acceleration_z\":"); Serial.print(zValue, 2); Serial.print(",");
+    cp.print(F("\"accelerometer_valid\":")); cp.print(accel_ok ? F("true,") : F("false,"));
+    if (accel_ok) {
+      cp.print(F("\"acceleration_x\":")); cp.print(xValue, 2); cp.print(F(","));
+      cp.print(F("\"acceleration_y\":")); cp.print(yValue, 2); cp.print(F(","));
+      cp.print(F("\"acceleration_z\":")); cp.print(zValue, 2); cp.print(F(","));
       // legacy aliases
-      Serial.print("\"mems_x\":"); Serial.print(xValue, 2); Serial.print(",");
-      Serial.print("\"mems_y\":"); Serial.print(yValue, 2); Serial.print(",");
-      Serial.print("\"mems_z\":"); Serial.print(zValue, 2); Serial.print(",");
-      Serial.print("\"mems_valid\":true,");
+      cp.print(F("\"mems_x\":")); cp.print(xValue, 2); cp.print(F(","));
+      cp.print(F("\"mems_y\":")); cp.print(yValue, 2); cp.print(F(","));
+      cp.print(F("\"mems_z\":")); cp.print(zValue, 2); cp.print(F(","));
+      cp.print(F("\"mems_valid\":true,"));
     } else {
-      Serial.print("\"acceleration_x\":null,");
-      Serial.print("\"acceleration_y\":null,");
-      Serial.print("\"acceleration_z\":null,");
-      // legacy aliases
-      Serial.print("\"mems_x\":null,");
-      Serial.print("\"mems_y\":null,");
-      Serial.print("\"mems_z\":null,");
-      Serial.print("\"mems_valid\":false,");
+      cp.print(F("\"acceleration_x\":null,"));
+      cp.print(F("\"acceleration_y\":null,"));
+      cp.print(F("\"acceleration_z\":null,"));
+      cp.print(F("\"mems_x\":null,"));
+      cp.print(F("\"mems_y\":null,"));
+      cp.print(F("\"mems_z\":null,"));
+      cp.print(F("\"mems_valid\":false,"));
     }
 
     // Heart Rate & SpO2 (MAX30102)
-    Serial.print("\"max_state\":\""); Serial.print(displayState); Serial.print("\",");
-    Serial.print("\"heart_rate_valid\":"); Serial.print(hr_ok ? "true," : "false,");
-    Serial.print("\"bpm_valid\":"); Serial.print(hr_ok ? "true," : "false,");
+    cp.print(F("\"max_state\":\"")); cp.print(displayState); cp.print(F("\","));
+    cp.print(F("\"heart_rate_valid\":")); cp.print(hr_ok ? F("true,") : F("false,"));
+    cp.print(F("\"bpm_valid\":")); cp.print(hr_ok ? F("true,") : F("false,"));
     if (hr_ok) {
-      Serial.print("\"heart_rate_bpm\":"); Serial.print(displayBPM); Serial.print(",");
-      Serial.print("\"bpm\":"); Serial.print(displayBPM); Serial.print(",");
+      cp.print(F("\"heart_rate_bpm\":")); cp.print(displayBPM); cp.print(F(","));
+      cp.print(F("\"bpm\":")); cp.print(displayBPM); cp.print(F(","));
     } else {
-      Serial.print("\"heart_rate_bpm\":null,");
-      Serial.print("\"bpm\":null,");
+      cp.print(F("\"heart_rate_bpm\":null,"));
+      cp.print(F("\"bpm\":null,"));
     }
-    Serial.print("\"bpm_quality\":"); Serial.print(displayBPMQuality, 2); Serial.print(",");
+    cp.print(F("\"bpm_quality\":")); cp.print(displayBPMQuality, 2); cp.print(F(","));
 
-    Serial.print("\"spo2_valid\":"); Serial.print(spo2_ok ? "true," : "false,");
+    cp.print(F("\"spo2_valid\":")); cp.print(spo2_ok ? F("true,") : F("false,"));
     if (spo2_ok) {
-      Serial.print("\"spo2_percent\":"); Serial.print(displaySpO2); Serial.print(",");
-      Serial.print("\"spo2\":"); Serial.print(displaySpO2); Serial.print(",");
+      cp.print(F("\"spo2_percent\":")); cp.print(displaySpO2); cp.print(F(","));
+      cp.print(F("\"spo2\":")); cp.print(displaySpO2); cp.print(F(","));
     } else {
-      Serial.print("\"spo2_percent\":null,");
-      Serial.print("\"spo2\":null,");
+      cp.print(F("\"spo2_percent\":null,"));
+      cp.print(F("\"spo2\":null,"));
     }
-    Serial.print("\"spo2_quality\":"); Serial.print(displaySpO2Quality, 2); Serial.print(",");
+    cp.print(F("\"spo2_quality\":")); cp.print(displaySpO2Quality, 2); cp.print(F(","));
 
     // Temperature & Humidity (DHT11)
-    Serial.print("\"temperature_valid\":"); Serial.print(dht_valid ? "true," : "false,");
-    if (dht_valid) {
-      Serial.print("\"temperature_c\":"); Serial.print(temperature, 1); Serial.print(",");
-      Serial.print("\"temperature\":"); Serial.print(temperature, 1); Serial.print(",");
-      Serial.print("\"humidity\":"); Serial.print(humidity, 1); Serial.print(",");
-      Serial.print("\"humidity_valid\":true,");
+    cp.print(F("\"temperature_valid\":")); cp.print(temp_ok ? F("true,") : F("false,"));
+    if (temp_ok) {
+      cp.print(F("\"temperature_c\":")); cp.print(temperature, 1); cp.print(F(","));
+      cp.print(F("\"temperature\":")); cp.print(temperature, 1); cp.print(F(","));
+      cp.print(F("\"humidity\":")); cp.print(humidity, 1); cp.print(F(","));
+      cp.print(F("\"humidity_valid\":true,"));
     } else {
-      Serial.print("\"temperature_c\":null,");
-      Serial.print("\"temperature\":null,");
-      Serial.print("\"humidity\":null,");
-      Serial.print("\"humidity_valid\":false,");
+      cp.print(F("\"temperature_c\":null,"));
+      cp.print(F("\"temperature\":null,"));
+      cp.print(F("\"humidity\":null,"));
+      cp.print(F("\"humidity_valid\":false,"));
     }
-    Serial.print("\"sensor_quality\":"); Serial.print(dht_sensor_quality, 2); Serial.print(",");
-    Serial.print("\"last_successful_read\":"); Serial.print(dht_last_successful_read); Serial.print(",");
+    cp.print(F("\"sensor_quality\":")); cp.print(dht_sensor_quality, 2); cp.print(F(","));
+    cp.print(F("\"last_successful_read\":")); cp.print(dht_last_successful_read); cp.print(F(","));
 
     // pH Sensor
-    Serial.print("\"ph_valid\":"); Serial.print(ph_valid ? "true," : "false,");
-    if (ph_valid) {
-      Serial.print("\"ph_value\":"); Serial.print(ph_value, 2); Serial.print(",");
-      Serial.print("\"ph\":"); Serial.print(ph_value, 2); Serial.print(",");
+    cp.print(F("\"ph_valid\":")); cp.print(ph_ok ? F("true,") : F("false,"));
+    if (ph_ok) {
+      cp.print(F("\"ph_value\":")); cp.print(ph_value, 2); cp.print(F(","));
+      cp.print(F("\"ph\":")); cp.print(ph_value, 2); cp.print(F(","));
     } else {
-      Serial.print("\"ph_value\":null,");
-      Serial.print("\"ph\":null,");
+      cp.print(F("\"ph_value\":null,"));
+      cp.print(F("\"ph\":null,"));
     }
 
     // LDR Sensor
-    Serial.print("\"ldr_valid\":"); Serial.print(ldr_valid ? "true," : "false,");
-    if (ldr_valid) {
-      Serial.print("\"ldr_value\":"); Serial.print(ldrValue); Serial.print(",");
-      Serial.print("\"ldr\":"); Serial.print(ldrValue); Serial.print(",");
+    cp.print(F("\"ldr_valid\":")); cp.print(ldr_ok ? F("true,") : F("false,"));
+    if (ldr_ok) {
+      cp.print(F("\"ldr_value\":")); cp.print(ldrValue); cp.print(F(","));
+      cp.print(F("\"ldr\":")); cp.print(ldrValue); cp.print(F(","));
     } else {
-      Serial.print("\"ldr_value\":null,");
-      Serial.print("\"ldr\":null,");
+      cp.print(F("\"ldr_value\":null,"));
+      cp.print(F("\"ldr\":null,"));
     }
     
     // GPS
-    Serial.print("\"gps_valid\":"); Serial.print(gps.location.isValid() ? "true," : "false,");
-    Serial.print("\"gps_lat\":"); Serial.print(LAT); Serial.print(",");
-    Serial.print("\"gps_lon\":"); Serial.print(LON); Serial.print(",");
-    Serial.print("\"gps_satellites\":"); Serial.print(gps.satellites.isValid() ? gps.satellites.value() : 0);
+    cp.print(F("\"gps_valid\":")); cp.print(gps.location.isValid() ? F("true,") : F("false,"));
+    cp.print(F("\"gps_lat\":")); cp.print(LAT); cp.print(F(","));
+    cp.print(F("\"gps_lon\":")); cp.print(LON); cp.print(F(","));
+    cp.print(F("\"gps_satellites\":")); cp.print(gps.satellites.isValid() ? gps.satellites.value() : 0);
     
-    Serial.println("}");
+    // Checksum of all preceding bytes
+    Serial.print(F(",\"chk\":"));
+    Serial.print(cp.checksum);
+    Serial.println(F("}"));
   }
 
   // ---------- RECEIVE ML RESULT OR COMMANDS FROM PYTHON ----------
@@ -682,73 +826,32 @@ void loop() {
           ph_calibration.voltage7 = v7;
           ph_calibration.magic = 0x5048;
           EEPROM.put(EEPROM_PH_ADDR, ph_calibration);
-          Serial.println("[pH] Calibration updated and saved to EEPROM");
+          Serial.println(F("[pH] Calibration updated and saved to EEPROM"));
         } else {
-          Serial.println("[pH] Calibration failed: invalid voltages");
+          Serial.println(F("[pH] Calibration failed: invalid voltages"));
         }
       }
     } else if (data.indexOf("a") != -1 && data.indexOf("b") != -1) {
       int spo2Alert = data.substring(data.indexOf("a") + 1, data.indexOf("b")).toInt();
-      int bpmAlert = data.substring(data.indexOf("b") + 1, data.indexOf("c")).toInt();
+      int bpmAlert  = data.substring(data.indexOf("b") + 1, data.indexOf("c")).toInt();
       int tempAlert = data.substring(data.indexOf("c") + 1, data.indexOf("d")).toInt();
       int memsAlert = data.substring(data.indexOf("d") + 1, data.indexOf("e")).toInt();
-      int phAlert = data.substring(data.indexOf("e") + 1, data.indexOf("f")).toInt();
-      int ldrAlert = data.substring(data.indexOf("f") + 1, data.indexOf("g")).toInt();
+      int phAlert   = data.substring(data.indexOf("e") + 1, data.indexOf("f")).toInt();
+      int ldrAlert  = data.substring(data.indexOf("f") + 1, data.indexOf("g")).toInt();
 
       if (spo2Alert == 0) {
-        lcd.clear(); lcd.print("SpO2 Abnormal"); sendSMS("SpO2 Abnormal"); delay(2000);
+        triggerAlertDisplay(F("SpO2 Abnormal"));
       } else if (bpmAlert == 0) {
-        lcd.clear(); lcd.print("BPM Abnormal"); sendSMS("BPM Abnormal"); delay(2000);
+        triggerAlertDisplay(F("BPM Abnormal"));
       } else if (tempAlert == 0) {
-        lcd.clear(); lcd.print("Temp Abnormal"); sendSMS("Temp Abnormal"); delay(2000);
+        triggerAlertDisplay(F("Temp Abnormal"));
       } else if (memsAlert == 0) {
-        lcd.clear(); lcd.print("Fall Detected"); sendSMS("Fall Detected"); delay(2000);
+        triggerAlertDisplay(F("Fall Detected"));
       } else if (phAlert == 0) {
-        lcd.clear(); lcd.print("pH Abnormal"); sendSMS("ph Abnormal"); delay(2000);
+        triggerAlertDisplay(F("pH Abnormal"));
       } else if (ldrAlert == 0) {
-        lcd.clear(); lcd.print("Milk Adultration"); sendSMS("Milk mixed water"); delay(2000);
+        triggerAlertDisplay(F("Milk Adulteration"));
       }
     }
   }
-}
-
-static void smartDelay(unsigned long ms) {
-  unsigned long start = millis();
-  do {
-    while (GPS_SERIAL.available())
-      gps.encode(GPS_SERIAL.read());
-  } while (millis() - start < ms);
-}
-
-void sendSMS(String msg) {
-  if (millis() - last_sms_time < SMS_COOLDOWN && last_sms_time != 0) {
-    Serial.println("{\"event\":\"sms_delivery\",\"status\":\"cooldown\",\"message\":\"Skipped due to cooldown\"}");
-    return;
-  }
-  
-  GSM_SERIAL.println("AT"); delay(1000);
-  GSM_SERIAL.println("AT+CMGF=1"); delay(500);
-  GSM_SERIAL.print("AT+CMGS=\"");
-  GSM_SERIAL.print(SMS_PHONE_NUMBER);
-  GSM_SERIAL.println("\""); delay(500);
-  
-  GSM_SERIAL.print("ALERT: ");
-  GSM_SERIAL.println(msg);
-  GSM_SERIAL.print("CATTLE ID: ");
-  GSM_SERIAL.println(CATTLE_ID);
-  
-  if (gps.location.isValid()) {
-    GSM_SERIAL.println("Location: https://maps.google.com/?q=" + LAT + "," + LON);
-  } else {
-    GSM_SERIAL.println("Location: GPS signal lost.");
-  }
-  
-  GSM_SERIAL.write(26); delay(5000);
-  
-  last_sms_time = millis();
-  
-  // Record SMS delivery attempt
-  Serial.print("{\"event\":\"sms_delivery\",\"status\":\"attempted\",\"message\":\"");
-  Serial.print(msg);
-  Serial.println("\"}");
 }

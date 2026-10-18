@@ -12,6 +12,8 @@ class TelemetryPacket(BaseModel):
     # Real Step Counting
     step_count_today: Optional[int] = 0
     step_count_lifetime: Optional[int] = 0
+    boot_count: Optional[int] = None
+    chk: Optional[int] = None
 
     # Accelerometer / MEMS (Phase 4 Contract + Legacy)
     acceleration_x: Optional[float] = None
@@ -92,47 +94,126 @@ class TelemetryPacket(BaseModel):
         data["accelerometer_valid"] = bool(accel_v)
         data["mems_valid"] = bool(accel_v)
 
-        # 3. Heart Rate reconciliation
+        # 3. Heart Rate reconciliation & physiological range check (Safeguard 12)
         hr_val = data.get("heart_rate_bpm") if data.get("heart_rate_bpm") is not None else (data.get("bpm") if data.get("bpm") is not None else data.get("heart_rate"))
         if hr_val is not None:
-            data["heart_rate_bpm"] = hr_val
-            data["bpm"] = hr_val
-            data["heart_rate"] = hr_val
+            try:
+                hr_num = float(hr_val)
+                if 20.0 <= hr_num <= 300.0:
+                    data["heart_rate_bpm"] = hr_num
+                    data["bpm"] = hr_num
+                    data["heart_rate"] = hr_num
+                else:
+                    data["heart_rate_bpm"] = None
+                    data["bpm"] = None
+                    data["heart_rate"] = None
+                    data["heart_rate_valid"] = False
+                    data["bpm_valid"] = False
+            except (ValueError, TypeError):
+                data["heart_rate_bpm"] = None
+                data["bpm"] = None
+                data["heart_rate"] = None
+                data["heart_rate_valid"] = False
         else:
             data["heart_rate_bpm"] = None
             data["bpm"] = None
             data["heart_rate"] = None
 
-        hr_v = data.get("heart_rate_valid", data.get("bpm_valid", False))
-        data["heart_rate_valid"] = bool(hr_v)
-        data["bpm_valid"] = bool(hr_v)
+        if data.get("heart_rate_bpm") is not None:
+            hr_v = data.get("heart_rate_valid", data.get("bpm_valid", data.get("hr_valid", True)))
+            data["heart_rate_valid"] = bool(hr_v)
+            data["bpm_valid"] = bool(hr_v)
+        else:
+            data["heart_rate_valid"] = False
+            data["bpm_valid"] = False
 
-        # 4. SpO2 reconciliation
-        if data.get("spo2_percent") is not None and data.get("spo2") is None:
-            data["spo2"] = data["spo2_percent"]
-        elif data.get("spo2") is not None and data.get("spo2_percent") is None:
-            data["spo2_percent"] = data["spo2"]
+        # 4. SpO2 reconciliation & range check (Safeguard 12)
+        spo2_val = data.get("spo2_percent") if data.get("spo2_percent") is not None else data.get("spo2")
+        if spo2_val is not None:
+            try:
+                spo2_num = float(spo2_val)
+                if 30.0 <= spo2_num <= 100.0:
+                    data["spo2"] = spo2_num
+                    data["spo2_percent"] = spo2_num
+                    data["spo2_valid"] = bool(data.get("spo2_valid", True))
+                else:
+                    data["spo2"] = None
+                    data["spo2_percent"] = None
+                    data["spo2_valid"] = False
+            except (ValueError, TypeError):
+                data["spo2"] = None
+                data["spo2_percent"] = None
+                data["spo2_valid"] = False
+        else:
+            data["spo2"] = None
+            data["spo2_percent"] = None
+            data["spo2_valid"] = False
 
-        spo2_v = data.get("spo2_valid", False)
-        data["spo2_valid"] = bool(spo2_v)
+        # 5. Temperature reconciliation & range check (Safeguard 12)
+        temp_val = data.get("temperature_c") if data.get("temperature_c") is not None else data.get("temperature")
+        if temp_val is not None:
+            try:
+                temp_num = float(temp_val)
+                if -20.0 <= temp_num <= 80.0:
+                    data["temperature"] = temp_num
+                    data["temperature_c"] = temp_num
+                    data["temperature_valid"] = bool(data.get("temperature_valid", data.get("temp_valid", True)))
+                else:
+                    data["temperature"] = None
+                    data["temperature_c"] = None
+                    data["temperature_valid"] = False
+            except (ValueError, TypeError):
+                data["temperature"] = None
+                data["temperature_c"] = None
+                data["temperature_valid"] = False
+        else:
+            data["temperature"] = None
+            data["temperature_c"] = None
+            data["temperature_valid"] = False
 
-        # 5. Temperature reconciliation
-        if data.get("temperature_c") is not None and data.get("temperature") is None:
-            data["temperature"] = data["temperature_c"]
-        elif data.get("temperature") is not None and data.get("temperature_c") is None:
-            data["temperature_c"] = data["temperature"]
+        # 6. pH reconciliation & range check (Safeguard 12)
+        ph_val = data.get("ph_value") if data.get("ph_value") is not None else data.get("ph")
+        if ph_val is not None:
+            try:
+                ph_num = float(ph_val)
+                if 0.0 <= ph_num <= 14.0:
+                    data["ph"] = ph_num
+                    data["ph_value"] = ph_num
+                    data["ph_valid"] = bool(data.get("ph_valid", True))
+                else:
+                    data["ph"] = None
+                    data["ph_value"] = None
+                    data["ph_valid"] = False
+            except (ValueError, TypeError):
+                data["ph"] = None
+                data["ph_value"] = None
+                data["ph_valid"] = False
+        else:
+            data["ph"] = None
+            data["ph_value"] = None
+            data["ph_valid"] = False
 
-        # 6. pH reconciliation
-        if data.get("ph_value") is not None and data.get("ph") is None:
-            data["ph"] = data["ph_value"]
-        elif data.get("ph") is not None and data.get("ph_value") is None:
-            data["ph_value"] = data["ph"]
-
-        # 7. LDR reconciliation
-        if data.get("ldr_value") is not None and data.get("ldr") is None:
-            data["ldr"] = data["ldr_value"]
-        elif data.get("ldr") is not None and data.get("ldr_value") is None:
-            data["ldr_value"] = data["ldr"]
+        # 7. LDR reconciliation & range check (Safeguard 12)
+        ldr_val = data.get("ldr_value") if data.get("ldr_value") is not None else data.get("ldr")
+        if ldr_val is not None:
+            try:
+                ldr_num = float(ldr_val)
+                if 0.0 <= ldr_num <= 1024.0:
+                    data["ldr"] = ldr_num
+                    data["ldr_value"] = ldr_num
+                    data["ldr_valid"] = bool(data.get("ldr_valid", True))
+                else:
+                    data["ldr"] = None
+                    data["ldr_value"] = None
+                    data["ldr_valid"] = False
+            except (ValueError, TypeError):
+                data["ldr"] = None
+                data["ldr_value"] = None
+                data["ldr_valid"] = False
+        else:
+            data["ldr"] = None
+            data["ldr_value"] = None
+            data["ldr_valid"] = False
 
         # 8. GPS coordinates to float when possible
         for k in ("gps_lat", "gps_lon"):
@@ -150,12 +231,29 @@ class TelemetryValidator:
     def __init__(self):
         self.last_sequences: Dict[str, int] = {}
 
-    def process(self, data: Any) -> Tuple[bool, Optional[TelemetryPacket], str]:
+    def process(self, data: Any, raw_line: Optional[str] = None) -> Tuple[bool, Optional[TelemetryPacket], str]:
         """
-        Validates incoming data dictionary against TelemetryPacket schema
-        and checks for sequence anomalies (duplicates, out-of-order).
+        Validates incoming data dictionary against TelemetryPacket schema,
+        verifies checksum if present, and checks for sequence anomalies.
         Returns: (is_valid, validated_packet, rejection_reason)
         """
+        # 1. Checksum validation (Safeguard 12)
+        if raw_line and ',"chk":' in raw_line:
+            idx = raw_line.rfind(',"chk":')
+            prefix = raw_line[:idx]
+            xor_sum = 0
+            for b in prefix.encode('utf-8'):
+                xor_sum ^= b
+
+            if isinstance(data, dict) and data.get("chk") is not None:
+                try:
+                    expected_chk = int(data["chk"])
+                    if xor_sum != expected_chk:
+                        return False, None, f"checksum_mismatch: got {expected_chk}, expected {xor_sum}"
+                except (ValueError, TypeError):
+                    return False, None, "invalid_checksum_format"
+
+        # 2. Pydantic Schema Parsing
         try:
             packet = TelemetryPacket(**data)
         except ValidationError as e:
@@ -163,6 +261,7 @@ class TelemetryValidator:
         except Exception as e:
             return False, None, f"malformed_data: {str(e)}"
 
+        # 3. Sequence / Reconnect validation
         dev_id = packet.device_id
         seq = packet.sequence or 0
         last_seq = self.last_sequences.get(dev_id)
@@ -171,7 +270,7 @@ class TelemetryValidator:
             if seq == last_seq:
                 return False, None, "duplicate_sequence"
             if seq < last_seq:
-                # Handle potential integer wrap-around or Arduino restart
+                # Handle integer wrap-around or Arduino reboot
                 if last_seq - seq > 1000 or seq < 10:
                     pass
                 else:

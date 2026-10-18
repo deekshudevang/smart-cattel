@@ -10,6 +10,7 @@
 struct StepEEPROMData {
   uint32_t lifetime_steps;
   uint32_t today_steps;
+  uint32_t boot_count;
   uint16_t day_identifier;
   int magic;
 };
@@ -25,6 +26,7 @@ public:
 
   uint32_t steps_today;
   uint32_t steps_lifetime;
+  uint32_t boot_count;
   bool step_detected_this_cycle;
 
 private:
@@ -43,6 +45,7 @@ public:
     min_step_interval_ms(380),
     steps_today(0),
     steps_lifetime(0),
+    boot_count(1),
     step_detected_this_cycle(false),
     gravity_est(9.806f),
     armed(true),
@@ -61,11 +64,14 @@ public:
     if (data.magic == STEP_EEPROM_MAGIC) {
       steps_lifetime = data.lifetime_steps;
       steps_today = data.today_steps;
+      boot_count = data.boot_count + 1; // Increment boot counter on each power cycle/reboot
       current_day_id = data.day_identifier;
       last_saved_steps = steps_lifetime;
+      saveToEEPROM(true); // Persist updated boot counter
     } else {
       steps_lifetime = 0;
       steps_today = 0;
+      boot_count = 1;
       current_day_id = 0;
       saveToEEPROM(true);
     }
@@ -79,6 +85,7 @@ public:
       StepEEPROMData data;
       data.lifetime_steps = steps_lifetime;
       data.today_steps = steps_today;
+      data.boot_count = boot_count;
       data.day_identifier = current_day_id;
       data.magic = STEP_EEPROM_MAGIC;
       EEPROM.put(EEPROM_STEP_ADDR, data);

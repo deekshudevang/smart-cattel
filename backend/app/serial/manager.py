@@ -315,8 +315,8 @@ class SerialManager:
                         try:
                             data = json.loads(line)
                             
-                            # Use TelemetryValidator for rigorous parsing and tracking
-                            is_valid, packet, reason = self.validator.process(data)
+                            # Use TelemetryValidator for rigorous parsing, checksum, and tracking
+                            is_valid, packet, reason = self.validator.process(data, raw_line=line)
                             
                             if is_valid and packet:
                                 self.last_packet = datetime.now()

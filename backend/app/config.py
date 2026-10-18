@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     
     HARDWARE_MODE: str = "real"
     ALLOW_SIMULATION: bool = False
+    TIMEZONE: str = "Asia/Kolkata"
     
     @property
     def cors_origins_list(self) -> List[str]:

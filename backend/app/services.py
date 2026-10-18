@@ -6,6 +6,8 @@ import os
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "ml", "inference"))
+from datetime import datetime, date, timezone
+from step_manager import AuthoritativeStepManager
 from predictor import HealthPredictor
 from fall_detection import fall_detector
 from engine import HealthRiskEngine
@@ -39,7 +41,8 @@ class DatabaseService:
             steps_today = filtered_data.get("step_count_today")
             if cid and steps_today is not None:
                 try:
-                    today_start = datetime.combine(date.today(), datetime.min.time())
+                    local_now = AuthoritativeStepManager.get_local_now()
+                    today_start = datetime.combine(local_now.date(), datetime.min.time())
                     today_act = db.query(models.Activity).filter(
                         models.Activity.cattle_id == cid,
                         models.Activity.date >= today_start
@@ -49,7 +52,7 @@ class DatabaseService:
                     else:
                         new_act = models.Activity(
                             cattle_id=cid,
-                            date=datetime.utcnow(),
+                            date=datetime.now(timezone.utc),
                             steps=int(steps_today)
                         )
                         db.add(new_act)
@@ -268,25 +271,36 @@ class SensorService:
                 logger.warning(f"[SENSOR SVC] Dropping packet for deleted cattle: {cattle_id}")
                 return {"status": "dropped", "reason": "deleted_cattle"}
 
-            # Persist real steps to Activity table for today
-            steps_today = validated_data.get("step_count_today")
-            if steps_today is not None:
-                from datetime import datetime, date
-                today_start = datetime.combine(date.today(), datetime.min.time())
-                today_act = _db.query(models.Activity).filter(
-                    models.Activity.cattle_id == cattle_id,
-                    models.Activity.date >= today_start
-                ).first()
-                if today_act:
-                    today_act.steps = int(steps_today)
-                else:
-                    new_act = models.Activity(
-                        cattle_id=cattle_id,
-                        date=datetime.utcnow(),
-                        steps=int(steps_today)
-                    )
-                    _db.add(new_act)
-                _db.commit()
+            # Authoritative Step Management (Safeguard 11 & Safeguard 4)
+            incoming_lifetime = validated_data.get("step_count_lifetime")
+            boot_count = validated_data.get("boot_count")
+            auth_today, auth_life = AuthoritativeStepManager.process_step_reading(
+                db=_db,
+                cattle_id=cattle_id,
+                incoming_lifetime=incoming_lifetime,
+                boot_count=boot_count
+            )
+            validated_data["step_count_today"] = auth_today
+            if incoming_lifetime is not None:
+                validated_data["step_count_lifetime"] = auth_life
+
+            # Persist steps to Activity table for today in configured timezone
+            local_now = AuthoritativeStepManager.get_local_now()
+            today_start = datetime.combine(local_now.date(), datetime.min.time())
+            today_act = _db.query(models.Activity).filter(
+                models.Activity.cattle_id == cattle_id,
+                models.Activity.date >= today_start
+            ).first()
+            if today_act:
+                today_act.steps = int(auth_today)
+            else:
+                new_act = models.Activity(
+                    cattle_id=cattle_id,
+                    date=datetime.now(timezone.utc),
+                    steps=int(auth_today)
+                )
+                _db.add(new_act)
+            _db.commit()
         except Exception as _e:
             _db.rollback()
             logger.warning(f"[SENSOR SVC] DB error updating cattle/activity {cattle_id}: {_e}")

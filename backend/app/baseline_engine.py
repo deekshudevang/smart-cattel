@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
 from database import models
@@ -49,7 +49,7 @@ class BaselineEngine:
             raise ValueError(f"Invalid window. Choose from {list(BaselineEngine.WINDOWS.keys())}")
             
         time_delta = BaselineEngine.WINDOWS[window]
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
         start_time = end_time - time_delta
         
         results = {}
