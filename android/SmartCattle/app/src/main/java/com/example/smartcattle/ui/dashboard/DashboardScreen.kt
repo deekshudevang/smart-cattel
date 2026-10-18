@@ -106,16 +106,26 @@ fun DashboardScreen(viewModel: CattleViewModel) {
         val ldrVal = if (!connected) "Offline" else if (d.ldr == null) "Not Available" else "${d.ldr}"
         val ldrStatus = if (!connected) "OFFLINE" else if (data == null) "STALE" else if (d.ldr == null) "NULL" else if (d.health.ldr == "abnormal") "INVALID" else "VALID"
         SensorCard("☀️", "Light",      ldrVal,                                if (!connected || d.ldr == null) "" else "lux", ldrStatus)
-        
-        val memsVal = if (!connected) "Offline" else if (d.memsX == null || d.memsY == null || d.memsZ == null) "Not Available" else String.format(Locale.US, "X:%.2f Y:%.2f Z:%.2f", d.memsX, d.memsY, d.memsZ)
-        val memsStatus = if (!connected) "OFFLINE" else if (data == null) "STALE" else if (d.memsX == null) "NULL" else if (d.fallDetected) "INVALID" else "VALID"
+
+        val stepsTodayVal = if (!connected) "Offline" else if (d.stepCountToday == null) "0" else "${d.stepCountToday}"
+        val stepsTodayStatus = if (!connected) "OFFLINE" else if (data == null) "STALE" else if (!d.accelerometerValid) "OFFLINE" else "VALID"
+        SensorCard("👟", "Steps Today", stepsTodayVal, "steps", stepsTodayStatus)
+
+        val stepsLifetimeVal = if (!connected) "Offline" else if (d.stepCountLifetime == null) "0" else "${d.stepCountLifetime}"
+        SensorCard("📊", "Lifetime Steps", stepsLifetimeVal, "steps", if (connected) "VALID" else "OFFLINE")
+
+        val accelX = d.accelerationX ?: d.memsX
+        val accelY = d.accelerationY ?: d.memsY
+        val accelZ = d.accelerationZ ?: d.memsZ
+        val accelVal = if (!connected) "Offline" else if (accelX == null || accelY == null || accelZ == null) "Not Available" else String.format(Locale.US, "X:%.1f Y:%.1f Z:%.1f", accelX, accelY, accelZ)
+        val accelStatus = if (!connected) "OFFLINE" else if (data == null) "STALE" else if (!d.accelerometerValid) "OFFLINE" else if (d.fallDetected) "INVALID" else "VALID"
         val memsBadge = if (connected && data != null && d.fallDetected) "FALL DETECTED" else null
         SensorCard(
             icon   = "🏃",
-            label  = "Motion / Fall",
-            value  = memsVal,
-            unit   = if (!connected || d.memsX == null) "" else "g",
-            status = memsStatus,
+            label  = "Acceleration (m/s²)",
+            value  = accelVal,
+            unit   = "",
+            status = accelStatus,
             badge  = memsBadge
         )
 

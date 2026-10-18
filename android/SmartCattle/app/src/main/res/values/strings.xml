@@ -1,0 +1,101 @@
+<resources>
+    <string name="app_name">Smart Cattle</string>
+    <string name="app_subtitle">Health Monitoring System</string>
+    <string name="live_monitoring">Live Monitoring</string>
+    <string name="enter_dashboard">Enter Dashboard</string>
+    <string name="powered_by">Powered by Arduino Mega + FastAPI + ML Engine</string>
+    <string name="feature_iot">IoT Sensors</string>
+    <string name="feature_ml">ML Engine</string>
+    <string name="feature_realtime">Real-time</string>
+
+    <!-- Navigation Tabs -->
+    <string name="tab_dashboard">Dashboard</string>
+    <string name="tab_alerts">Alerts</string>
+    <string name="tab_history">History</string>
+    <string name="tab_cows">Cows</string>
+    <string name="tab_settings">Settings</string>
+
+    <!-- Connection Status -->
+    <string name="status_online">Online</string>
+    <string name="status_offline">Offline</string>
+    <string name="status_reconnecting">Reconnecting</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_waiting_arduino">Waiting for Arduino</string>
+    <string name="status_all_healthy">All Healthy</string>
+    <string name="status_at_risk">At Risk</string>
+    <string name="status_healthy">Healthy</string>
+    <string name="status_warning">Warning</string>
+    <string name="status_critical">Critical</string>
+    <string name="status_fall_detected">Fall Detected</string>
+    <string name="status_active">Active</string>
+    <string name="status_lifetime">Lifetime</string>
+    <string name="status_sensor_offline">Sensor Offline</string>
+    <string name="not_available">Not Available</string>
+
+    <!-- Sensor Labels -->
+    <string name="sensor_steps_today">Steps Today</string>
+    <string name="sensor_total_steps">Total Steps</string>
+    <string name="sensor_acceleration">Acceleration</string>
+    <string name="sensor_spo2">SpO2</string>
+    <string name="sensor_heart_rate">Heart Rate</string>
+    <string name="sensor_temperature">Body Temp</string>
+    <string name="sensor_humidity">Humidity</string>
+    <string name="sensor_ph">pH Level</string>
+    <string name="sensor_ldr">Light</string>
+
+    <!-- Cow Management -->
+    <string name="cows_title">Cow Profiles</string>
+    <string name="cows_subtitle">Tap a card to view profile • Manage cattle</string>
+    <string name="add_new_cow">Add New Cow</string>
+    <string name="edit_cow_profile">Edit Profile</string>
+    <string name="remove_cow">Remove Cow</string>
+    <string name="remove_cow_prompt">Remove Cow?</string>
+    <string name="view_profile">View Profile</string>
+    <string name="field_cow_id">Cow ID *</string>
+    <string name="field_name">Name *</string>
+    <string name="field_breed">Breed</string>
+    <string name="field_age">Age (e.g. 4 yrs)</string>
+    <string name="field_gender">Gender</string>
+    <string name="field_gender_female">Female</string>
+    <string name="field_gender_male">Male</string>
+    <string name="field_dob">Date of Birth (YYYY-MM-DD)</string>
+    <string name="field_notes">Notes</string>
+    <string name="btn_select_photo">📷 Select Photo</string>
+    <string name="btn_change_photo">📷 Change Photo</string>
+    <string name="photo_selected">✓ Photo selected</string>
+    <string name="btn_save_changes">Save Changes</string>
+    <string name="btn_cancel">Cancel</string>
+    <string name="btn_connect">Connect</string>
+    <string name="btn_retry">Retry</string>
+    <string name="btn_close">Close</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_server_title">Server Uplink</string>
+    <string name="settings_server_desc">Local Wi-Fi IP and port running FastAPI backend</string>
+    <string name="settings_host_ip">Host IP Address</string>
+    <string name="settings_port">Port</string>
+    <string name="settings_theme_title">Appearance Theme</string>
+    <string name="settings_theme_desc">Choose application appearance</string>
+    <string name="theme_system">System Default</string>
+    <string name="theme_light">Light Mode</string>
+    <string name="theme_dark">Dark Mode</string>
+    <string name="theme_dynamic">Dynamic Color (Material You)</string>
+
+    <!-- Empty and Error States -->
+    <string name="empty_cows_title">No cows registered yet</string>
+    <string name="empty_cows_desc">Tap + to register your first cattle profile</string>
+    <string name="empty_alerts_title">No active health alerts</string>
+    <string name="empty_alerts_desc">All physical sensor streams report normal biometrics</string>
+    <string name="empty_history_title">No sensor history recorded</string>
+    <string name="empty_history_desc">Readings will appear as live packets are processed</string>
+    <string name="empty_dashboard_desc">Connect to the backend in Settings to begin streaming live telemetry</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_settings">Settings</string>
+    <string name="action_refresh">Refresh</string>
+    <string name="last_sync">Last sync:</string>
+    <string name="loading">Loading live data…</string>
+    <string name="error_generic_title">Connection Error</string>
+    <string name="filter_all">All</string>
+    <string name="search_hint">Search cattle by ID, name or breed…</string>
+</resources>

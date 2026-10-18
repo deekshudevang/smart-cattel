@@ -17,13 +17,18 @@ from typing import Optional, List
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from database.database import engine, SessionLocal, get_db
-from database import models
+from app.database.database import engine, SessionLocal, get_db
+from app.database import models
 from websocket.manager import manager
 from config import settings
 from services import SensorService, PredictionService
+from schemas.websocket import WebSocketEvent
+import redis.asyncio as redis_async
 from auth import get_current_user, require_admin
 from routers import analytics, calibration, cattle, devices
+from app.serial.manager import SerialManager
+
+serial_manager = SerialManager()
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -118,7 +123,7 @@ class CowUpdate(BaseModel):
     device_id: Optional[str] = None
 
 from fastapi.security import OAuth2PasswordRequestForm
-from backend.app.auth import create_access_token
+from app.auth import create_access_token
 
 @app.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
@@ -128,105 +133,42 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
     access_token = create_access_token(data={"sub": form_data.username, "role": "ADMIN"})
     return {"access_token": access_token, "token_type": "bearer"}
 
-last_arduino_time = 0.0
 
-async def _offline_monitor():
+
+async def redis_listener():
+    retry_delay = 5
     while True:
         try:
-            await asyncio.sleep(2)
-            if time.time() - last_arduino_time > 5.0:
-                await manager.broadcast({"type": "status", "status": "offline"})
-            else:
-                await manager.broadcast({"type": "status", "status": "online"})
+            r = redis_async.from_url(settings.REDIS_URL)
+            pubsub = r.pubsub()
+            await pubsub.subscribe("telemetry_broadcast")
+            logger.info("Subscribed to Redis telemetry_broadcast")
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    data_str = message["data"].decode("utf-8")
+                    try:
+                        event = WebSocketEvent.model_validate_json(data_str)
+                        await manager.broadcast(event)
+                    except Exception as e:
+                        logger.error(f"Error broadcasting redis message: {e}")
+            # If listen loop exits, reconnect
+            await asyncio.sleep(retry_delay)
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error(f"Offline monitor error: {e}")
-
-_main_loop: asyncio.AbstractEventLoop = None
-
-async def _simulator_loop():
-    logger.info("Starting simulator loop...")
-    while True:
-        try:
-            await asyncio.sleep(5)
-            # Pick a random cattle ID
-            with database.SessionLocal() as db:
-                cattle_list = db.query(models.Cattle).filter(models.Cattle.deleted == False).all()
-                if not cattle_list:
-                    continue
-                cattle_ids = [c.cattle_id for c in cattle_list]
-                
-            cid = random.choice(cattle_ids)
-            data = {
-                "cattle_id": cid,
-                "temperature": round(random.uniform(37.5, 39.5), 2),
-                "heart_rate": random.randint(48, 84),
-                "spo2": random.randint(95, 100),
-                "mems_x": round(random.uniform(-1, 1), 2),
-                "mems_y": round(random.uniform(-1, 1), 2),
-                "mems_z": round(random.uniform(9, 10), 2),
-                "ph": round(random.uniform(6.5, 7.5), 2),
-                "ldr": random.randint(100, 1000)
-            }
-            # process reading
-            await sensor_service.process_reading(data, manager)
-            logger.info(f"[SIMULATOR] Sent data for {cid}")
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Simulator error: {e}")
-
-
-def handle_arduino_data(data: dict):
-    global last_arduino_time, _main_loop
-    last_arduino_time = time.time()
-    if _main_loop is None:
-        logger.error("Main event loop not set — cannot process Arduino data")
-        return
-    try:
-        future = asyncio.run_coroutine_threadsafe(
-            sensor_service.process_reading(data, manager),
-            _main_loop
-        )
-        result = future.result(timeout=10)  # wait up to 10s
-
-        preds = result["predictions"]
-        a = "1" if preds.get("spo2", {}).get("status", "normal") == "normal" else "0"
-        b = "1" if preds.get("heart_rate", {}).get("status", "normal") == "normal" else "0"
-        c = "1" if preds.get("temperature", {}).get("status", "normal") == "normal" else "0"
-        d = "1" if preds.get("mems", {}).get("status", "normal") == "normal" else "0"
-        e = "1" if preds.get("ph", {}).get("status", "normal") == "normal" else "0"
-        f = "1" if preds.get("ldr", {}).get("status", "normal") == "normal" else "0"
-
-        if serial_reader:
-            serial_reader.write(f"a{a}b{b}c{c}d{d}e{e}f{f}g")
-        logger.info(f"[ARDUINO] {data.get('cattle_id', 'unknown')}: overall={'abnormal' if '0' in [a,b,c,d,e,f] else 'normal'}")
-    except Exception as e:
-        logger.error(f"Arduino data handling error: {e}")
-
-
-serial_reader = None
-
-def _try_arduino():
-    global serial_reader
-    try:
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "serial"))
-        from manager import SerialManager as SR
-        serial_reader = SR(fallback_port=settings.SERIAL_PORT, baudrate=settings.SERIAL_BAUDRATE)
-        serial_reader.start(callback=handle_arduino_data)
-        return True
-    except Exception as e:
-        logger.warning(f"Arduino not available ({e}).")
-        return False
+            logger.debug(f"Redis not available, retrying in {retry_delay}s... ({e})")
+            await asyncio.sleep(retry_delay)
 
 @app.on_event("startup")
 async def startup_event():
-    global _main_loop
-    _main_loop = asyncio.get_event_loop()  # capture FastAPI's loop for thread-safe scheduling
     asyncio.create_task(manager.ping_clients())
+    # asyncio.create_task(redis_listener())
 
-
+    loop = asyncio.get_running_loop()
+    def on_serial_data(data):
+        asyncio.run_coroutine_threadsafe(sensor_service.process_reading(data, manager), loop)
+        
+    serial_manager.start(callback=on_serial_data)
 
     db = SessionLocal()
     try:
@@ -238,80 +180,58 @@ async def startup_event():
     finally:
         db.close()
 
-    asyncio.create_task(_offline_monitor())
-
-    if settings.HARDWARE_MODE == "real":
-        if _try_arduino():
-            logger.info("=" * 50)
-            logger.info(f"ARDUINO MODE: Reading real sensor data from {settings.SERIAL_PORT}")
-            logger.info("=" * 50)
-        else:
-            logger.error("ARDUINO_CONNECTION_FAILED")
-            # Do not start simulator in real mode
-    elif settings.HARDWARE_MODE == "simulation":
-        if settings.ALLOW_SIMULATION:
-            logger.info("=" * 50)
-            logger.info("SIMULATOR MODE: Generating mock sensor data")
-            logger.info("=" * 50)
-            asyncio.create_task(_simulator_loop())
-        else:
-            logger.warning("Simulation requested but ALLOW_SIMULATION is false.")
-    else:
-        logger.warning(f"Unknown HARDWARE_MODE: {settings.HARDWARE_MODE}")
-
 
 @app.on_event("shutdown")
 def shutdown_event():
-    if serial_reader:
-        serial_reader.stop()
+    pass
 
 @app.get("/api/health")
 @limiter.limit("10/minute")
 def health_check(request: Request):
     return {"status": "ok", "models_loaded": len(prediction_service.predictor.models)}
 
-@app.get("/api/arduino/status")
-def get_arduino_status():
-    global serial_reader
-    mode = settings.HARDWARE_MODE
-    sim_enabled = settings.ALLOW_SIMULATION
-    if serial_reader:
-        status = serial_reader.get_status()
-        return {
-            "mode": mode,
-            "connected": status["connected"],
-            "port": status["port"],
-            "device": status.get("device"),
-            "last_data": status["last_packet"],
-            "simulation_enabled": sim_enabled
-        }
+@app.get("/api/diagnostics/hardware")
+def hardware_diagnostics():
+    status = serial_manager.get_status()
     return {
-        "mode": mode,
-        "connected": False,
-        "port": None,
-        "device": None,
-        "last_data": None,
-        "simulation_enabled": sim_enabled
+        "serial_connected": status.get("connected", False),
+        "port": status.get("port"),
+        "device": status.get("device"),
+        "last_packet": status.get("last_packet"),
+        "packets_received": status.get("packets_received", 0),
+        "packets_rejected": status.get("packets_rejected", 0),
+        "reconnect_count": status.get("reconnect_count", 0),
+        "errors": status.get("errors", 0),
+        "last_packet_timestamp": status.get("last_packet")
     }
 
+@app.get("/api/arduino/status")
+def get_arduino_status():
+    status = serial_manager.get_status()
+    return {
+        "mode": "direct",
+        "connected": status.get("connected", False),
+        "port": status.get("port"),
+        "device": status.get("device"),
+        "last_data": status.get("last_packet"),
+        "simulation_enabled": False,
+        "error": status.get("error_detail")
+    }
 
 @app.post("/api/arduino/disconnect")
 def arduino_disconnect():
-    """Release COM port so Arduino IDE can upload a new sketch."""
-    global serial_reader
-    if serial_reader:
-        serial_reader.stop()
-        serial_reader = None
-    return {"status": "disconnected", "message": "COM port released. Safe to upload sketch."}
+    serial_manager.disconnect()
+    return {"status": "success", "message": "Disconnected from Arduino"}
+
+@app.post("/api/arduino/release")
+def arduino_release():
+    serial_manager.disconnect()
+    return {"status": "success", "message": "Released Arduino"}
 
 @app.post("/api/arduino/reconnect")
 def arduino_reconnect():
-    """Re-attach to the Arduino after uploading a new sketch."""
-    global serial_reader
-    if serial_reader:
-        return {"status": "already_connected"}
-    success = _try_arduino()
-    return {"status": "connected" if success else "failed"}
+    serial_manager.reconnect()
+    return {"status": "success", "message": "Reconnecting to Arduino"}
 
 @app.post("/api/sensor/data")
 async def receive_sensor_data(request: Request):
@@ -321,7 +241,10 @@ async def receive_sensor_data(request: Request):
 
 @app.get("/api/cattle")
 def get_cattle(db: Session = Depends(get_db)):
-    cattle_list = db.query(models.Cattle).all()
+    from sqlalchemy import or_
+    cattle_list = db.query(models.Cattle).filter(
+        or_(models.Cattle.deleted == False, models.Cattle.deleted == None)
+    ).all()
     return [{"cattle_id": c.cattle_id, "name": c.name, "status": c.status} for c in cattle_list]
 
 @app.get("/api/cows")
@@ -362,6 +285,20 @@ def get_cows(db: Session = Depends(get_db)):
                 "spo2": reading.spo2 if reading else None,
                 "heart_rate": reading.heart_rate if reading else None,
                 "temperature": reading.temperature if reading else None,
+                "humidity": reading.humidity if reading else None,
+                "ph": reading.ph if reading else None,
+                "ldr": reading.ldr if reading else None,
+                "step_count_today": reading.step_count_today if reading else (latest_act.steps if latest_act else None),
+                "step_count_lifetime": reading.step_count_lifetime if reading else None,
+                "acceleration_x": reading.acceleration_x if reading else None,
+                "acceleration_y": reading.acceleration_y if reading else None,
+                "acceleration_z": reading.acceleration_z if reading else None,
+                "accelerometer_valid": reading.accelerometer_valid if reading else False,
+                "heart_rate_valid": reading.heart_rate_valid if reading else False,
+                "spo2_valid": reading.spo2_valid if reading else False,
+                "temperature_valid": reading.temperature_valid if reading else False,
+                "ph_valid": reading.ph_valid if reading else False,
+                "ldr_valid": reading.ldr_valid if reading else False,
                 "overall_status": prediction.overall_status if prediction else None
             },
             "latest_milk": {
@@ -421,6 +358,20 @@ def get_cow(cattle_id: str, db: Session = Depends(get_db)):
             "spo2": reading.spo2 if reading else None,
             "heart_rate": reading.heart_rate if reading else None,
             "temperature": reading.temperature if reading else None,
+            "humidity": reading.humidity if reading else None,
+            "ph": reading.ph if reading else None,
+            "ldr": reading.ldr if reading else None,
+            "step_count_today": reading.step_count_today if reading else (latest_act.steps if latest_act else None),
+            "step_count_lifetime": reading.step_count_lifetime if reading else None,
+            "acceleration_x": reading.acceleration_x if reading else None,
+            "acceleration_y": reading.acceleration_y if reading else None,
+            "acceleration_z": reading.acceleration_z if reading else None,
+            "accelerometer_valid": reading.accelerometer_valid if reading else False,
+            "heart_rate_valid": reading.heart_rate_valid if reading else False,
+            "spo2_valid": reading.spo2_valid if reading else False,
+            "temperature_valid": reading.temperature_valid if reading else False,
+            "ph_valid": reading.ph_valid if reading else False,
+            "ldr_valid": reading.ldr_valid if reading else False,
             "overall_status": prediction.overall_status if prediction else None
         },
         "latest_milk": {
@@ -539,7 +490,10 @@ def delete_cow(cattle_id: str, db: Session = Depends(get_db)):
     if not cow:
         raise HTTPException(status_code=404, detail="Cow not found")
     cow.deleted = True  # soft delete - keeps all sensor/health/milk data intact
+    # Unassign any active device assignments
+    db.query(models.Device).filter(models.Device.cattle_id == cattle_id).update({"cattle_id": None})
     db.commit()
+    logger.info(f"[DELETE COW] Soft-deleted cow and unassigned devices for: {cattle_id}")
     return None
 
 @app.get("/api/cows/{cattle_id}")
@@ -575,6 +529,18 @@ def get_cow_by_id(cattle_id: str, db: Session = Depends(get_db)):
             "temperature": reading.temperature if reading else None,
             "humidity": reading.humidity if reading else None,
             "ph": reading.ph if reading else None,
+            "ldr": reading.ldr if reading else None,
+            "step_count_today": reading.step_count_today if reading else (latest_act.steps if latest_act else None),
+            "step_count_lifetime": reading.step_count_lifetime if reading else None,
+            "acceleration_x": reading.acceleration_x if reading else None,
+            "acceleration_y": reading.acceleration_y if reading else None,
+            "acceleration_z": reading.acceleration_z if reading else None,
+            "accelerometer_valid": reading.accelerometer_valid if reading else False,
+            "heart_rate_valid": reading.heart_rate_valid if reading else False,
+            "spo2_valid": reading.spo2_valid if reading else False,
+            "temperature_valid": reading.temperature_valid if reading else False,
+            "ph_valid": reading.ph_valid if reading else False,
+            "ldr_valid": reading.ldr_valid if reading else False,
             "overall_status": prediction.overall_status if prediction else None
         },
         "latest_milk": {
@@ -613,6 +579,18 @@ def get_latest_reading(cattle_id: str, db: Session = Depends(get_db)):
         "mems_x": reading.mems_x,
         "mems_y": reading.mems_y,
         "mems_z": reading.mems_z,
+        "acceleration_x": reading.acceleration_x,
+        "acceleration_y": reading.acceleration_y,
+        "acceleration_z": reading.acceleration_z,
+        "step_count_today": reading.step_count_today,
+        "step_count_lifetime": reading.step_count_lifetime,
+        "accelerometer_valid": reading.accelerometer_valid,
+        "heart_rate_valid": reading.heart_rate_valid,
+        "spo2_valid": reading.spo2_valid,
+        "temperature_valid": reading.temperature_valid,
+        "ph_valid": reading.ph_valid,
+        "ldr_valid": reading.ldr_valid,
+        "device_connected": reading.device_connected,
         "ph": reading.ph,
         "ldr": reading.ldr,
         "fall_detected": fall_detected,
@@ -786,8 +764,12 @@ def get_history_comparison(cattle_id: str, parameter: str, days: int = 7, db: Se
     return {"message": "Historical comparison for " + parameter, "data": []}
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, client_id: str = Query(...), reconnect: bool = Query(False)):
+async def general_websocket_endpoint(websocket: WebSocket, client_id: str = Query(None), reconnect: bool = Query(False)):
+    if not client_id:
+        await websocket.close(code=1008)
+        return
     await manager.connect(websocket, client_id, reconnect)
+    manager.subscribe(client_id, "CATTLE-ALL")
     try:
         while True:
             data = await websocket.receive_text()
@@ -795,10 +777,42 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str = Query(...), 
                 if client_id in manager.active_connections:
                     manager.active_connections[client_id].update_last_seen()
             elif data.startswith("subscribe:"):
-                cattle_id = data.split(":")[1]
-                manager.subscribe(client_id, cattle_id)
+                new_cattle = data.split(":")[1]
+                manager.subscribe(client_id, new_cattle)
     except WebSocketDisconnect:
         manager.disconnect(client_id)
+
+@app.websocket("/ws/cattle/{cattle_id}")
+async def websocket_endpoint(websocket: WebSocket, cattle_id: str, client_id: str = Query(None), reconnect: bool = Query(False)):
+    # Use cattle_id as client_id if not provided
+    actual_client_id = client_id or f"client_{cattle_id}_{int(time.time())}"
+    await manager.connect(websocket, actual_client_id, reconnect)
+    manager.subscribe(actual_client_id, cattle_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data == "pong" or "pong" in data:
+                if actual_client_id in manager.active_connections:
+                    manager.active_connections[actual_client_id].update_last_seen()
+            elif data.startswith("subscribe:"):
+                new_cattle = data.split(":")[1]
+                manager.subscribe(actual_client_id, new_cattle)
+    except WebSocketDisconnect:
+        manager.disconnect(actual_client_id)
+
+@app.websocket("/ws/dashboard")
+async def dashboard_websocket_endpoint(websocket: WebSocket, client_id: str = Query(None), reconnect: bool = Query(False)):
+    actual_client_id = client_id or f"dashboard_{int(time.time())}"
+    await manager.connect(websocket, actual_client_id, reconnect)
+    # By not subscribing to any specific cattle_id, this connection will receive all events
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data == "pong" or "pong" in data:
+                if actual_client_id in manager.active_connections:
+                    manager.active_connections[actual_client_id].update_last_seen()
+    except WebSocketDisconnect:
+        manager.disconnect(actual_client_id)
 
 if __name__ == "__main__":
     import uvicorn

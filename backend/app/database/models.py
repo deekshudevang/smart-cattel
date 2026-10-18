@@ -68,14 +68,22 @@ class SensorReading(Base, BaseMixin):
     device_id = Column(String, ForeignKey("devices.device_id"), index=True, nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
     
-    spo2 = Column(Integer)
-    heart_rate = Column(Integer)
-    temperature = Column(Float)
-    humidity = Column(Float)
+    spo2 = Column(Integer, nullable=True)
+    heart_rate = Column(Integer, nullable=True)
+    temperature = Column(Float, nullable=True)
+    humidity = Column(Float, nullable=True)
     
-    mems_x = Column(Float)
-    mems_y = Column(Float)
-    mems_z = Column(Float)
+    # Steps
+    step_count_today = Column(Integer, nullable=True)
+    step_count_lifetime = Column(Integer, nullable=True)
+
+    # Accelerometer / MEMS
+    mems_x = Column(Float, nullable=True)
+    mems_y = Column(Float, nullable=True)
+    mems_z = Column(Float, nullable=True)
+    acceleration_x = Column(Float, nullable=True)
+    acceleration_y = Column(Float, nullable=True)
+    acceleration_z = Column(Float, nullable=True)
     acceleration_magnitude = Column(Float, nullable=True)
     activity_state = Column(String, nullable=True)
     activity_score = Column(Float, nullable=True)
@@ -83,9 +91,18 @@ class SensorReading(Base, BaseMixin):
     fall_confidence = Column(Float, nullable=True)
     peak_acceleration = Column(Float, nullable=True)
     
-    ph = Column(Float)
-    ldr = Column(Integer)
+    ph = Column(Float, nullable=True)
+    ldr = Column(Integer, nullable=True)
     
+    # Sensor Validity Flags
+    accelerometer_valid = Column(Boolean, default=False)
+    heart_rate_valid = Column(Boolean, default=False)
+    spo2_valid = Column(Boolean, default=False)
+    temperature_valid = Column(Boolean, default=False)
+    ph_valid = Column(Boolean, default=False)
+    ldr_valid = Column(Boolean, default=False)
+    device_connected = Column(Boolean, default=True)
+
     # GPS and GSM
     gps_valid = Column(Boolean, default=False)
     gps_lat = Column(Float, nullable=True)

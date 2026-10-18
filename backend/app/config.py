@@ -4,10 +4,9 @@ from typing import List
 class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DATABASE_URL: str = "sqlite:///./smart_cattle.db"
+    REDIS_URL: str = "redis://localhost:6379"
     SERIAL_PORT: str
     SERIAL_BAUDRATE: int = 9600
-    HARDWARE_MODE: str = "real"
-    ALLOW_SIMULATION: bool = False
     JWT_SECRET: str
     SMS_PHONE_NUMBER: str
     CORS_ORIGINS: str = "*"
@@ -18,10 +17,13 @@ class Settings(BaseSettings):
     ADMIN_USERNAME: str
     ADMIN_PASSWORD: str
     
+    HARDWARE_MODE: str = "real"
+    ALLOW_SIMULATION: bool = False
+    
     @property
     def cors_origins_list(self) -> List[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()

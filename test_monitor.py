@@ -7,9 +7,9 @@ def check_status():
     try:
         resp = urllib.request.urlopen('http://localhost:8000/api/arduino/status', timeout=2)
         data = json.loads(resp.read().decode())
-        print(f"🔌 Arduino Status: {data}")
+        print(f"[STATUS] Arduino Status: {data}")
     except Exception as e:
-        print(f"🔌 Arduino Status Error: {e}")
+        print(f"[ERROR] Arduino Status Error: {e}")
 
 def get_latest_data():
     try:
@@ -17,15 +17,15 @@ def get_latest_data():
         data = json.loads(resp.read().decode())
         if 'cows' in data and len(data['cows']) > 0:
             cow = data['cows'][0]
-            print(f"📡 Latest Payload for {cow.get('id', 'Unknown')}:")
-            print(f"   ❤️ BPM/SpO2: {cow.get('heart_rate')}/{cow.get('spo2')}")
-            print(f"   🌡️ Temp/Hum: {cow.get('temperature')}/{cow.get('humidity')}")
-            print(f"   🧪 pH: {cow.get('ph_level')}")
-            print(f"   📈 Activity: {cow.get('activity_level')}")
+            print(f"[DATA] Latest Payload for {cow.get('id', 'Unknown')}:")
+            print(f"   BPM/SpO2: {cow.get('heart_rate')}/{cow.get('spo2')}")
+            print(f"   Temp/Hum: {cow.get('temperature')}/{cow.get('humidity')}")
+            print(f"   pH: {cow.get('ph_level')}")
+            print(f"   Activity: {cow.get('activity_level')}")
         else:
-            print("📡 No cattle data received yet.")
+            print("[DATA] No cattle data received yet.")
     except Exception as e:
-        print(f"📡 Data Error: {e}")
+        print(f"[ERROR] Data Error: {e}")
 
 if __name__ == "__main__":
     print("Starting Hardware Monitor...")

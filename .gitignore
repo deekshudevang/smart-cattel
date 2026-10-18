@@ -10,6 +10,13 @@ env/
 *.db
 *.sqlite3
 backend/smart_cattle.db
+backups/
+*.bak
+*.log
+local.properties
+Nexus-Support/
+stacktrace.txt
+test_serial_raw*.py
 
 # Android
 *.iml

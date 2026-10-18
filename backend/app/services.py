@@ -19,8 +19,43 @@ class DatabaseService:
         try:
             valid_keys = models.SensorReading.__table__.columns.keys()
             filtered_data = {k: v for k, v in data.items() if k in valid_keys}
+            
+            ts = filtered_data.get("timestamp")
+            from datetime import datetime, date
+            if ts is not None and not isinstance(ts, (datetime, date)):
+                try:
+                    ts_float = float(ts)
+                    if ts_float > 1e10:
+                        ts_float = ts_float / 1000.0
+                    filtered_data["timestamp"] = datetime.fromtimestamp(ts_float)
+                except (ValueError, TypeError):
+                    del filtered_data["timestamp"]
+                
             reading = models.SensorReading(**filtered_data)
             db.add(reading)
+
+            # Sync steps to Activity table for today if step_count_today is present
+            cid = filtered_data.get("cattle_id")
+            steps_today = filtered_data.get("step_count_today")
+            if cid and steps_today is not None:
+                try:
+                    today_start = datetime.combine(date.today(), datetime.min.time())
+                    today_act = db.query(models.Activity).filter(
+                        models.Activity.cattle_id == cid,
+                        models.Activity.date >= today_start
+                    ).first()
+                    if today_act:
+                        today_act.steps = int(steps_today)
+                    else:
+                        new_act = models.Activity(
+                            cattle_id=cid,
+                            date=datetime.utcnow(),
+                            steps=int(steps_today)
+                        )
+                        db.add(new_act)
+                except Exception:
+                    pass
+
             db.commit()
             db.refresh(reading)
             return reading.id
@@ -89,11 +124,16 @@ class AlertService:
             "data": data,
             "health": health_with_overall,
         }
+        import logging as _log
+        _logger = _log.getLogger("alert_service")
+        _logger.info(
+            f"[WS OUT] cattle={cattle_id} ldr={data.get('ldr')} "
+            f"spo2={data.get('spo2')} bpm={data.get('bpm')} "
+            f"temp={data.get('temperature')} overall={overall}"
+        )
         try:
-            # Assume EventType can be imported from schemas.websocket
-            from schemas.websocket import EventType
             ws_event = manager.format_event(
-                event_type=EventType.SENSOR_UPDATE,
+                event_type="sensor_update",
                 payload=payload,
                 cattle_id=cattle_id
             )
@@ -157,12 +197,25 @@ class ValidationService:
         
         last_seq = cls._last_sequence.get(device_id, -1)
         if seq <= last_seq and seq != 0:
-            raise ValueError(f"Stale sequence {seq}, expected > {last_seq}")
+            if last_seq - seq <= 1000 and seq >= 10:
+                raise ValueError(f"Stale sequence {seq}, expected > {last_seq}")
         cls._last_sequence[device_id] = seq
 
-        data["cattle_id"] = device_id
-        if "bpm" in data:
+        # Preserve incoming cattle_id, fallback to device_id
+        if not data.get("cattle_id"):
+            data["cattle_id"] = device_id
+
+        # Sync heart_rate / bpm
+        if "bpm" in data and "heart_rate" not in data:
             data["heart_rate"] = data["bpm"]
+        elif "heart_rate_bpm" in data and "heart_rate" not in data:
+            data["heart_rate"] = data["heart_rate_bpm"]
+        elif "heart_rate" in data and "bpm" not in data:
+            data["bpm"] = data["heart_rate"]
+
+        # Sync step counts
+        if "step_count_today" not in data and "steps" in data:
+            data["step_count_today"] = data["steps"]
 
         return data
 
@@ -194,12 +247,51 @@ class SensorService:
         
         logger.info(
             f"[SENSOR IN] cattle={validated_data.get('cattle_id')} "
+            f"steps_today={validated_data.get('step_count_today')} lifetime={validated_data.get('step_count_lifetime')} "
             f"heart_rate={validated_data.get('heart_rate')} spo2={validated_data.get('spo2')} "
             f"temp={validated_data.get('temperature')} ph={validated_data.get('ph')} "
             f"ldr={validated_data.get('ldr')} "
             f"mems=({validated_data.get('mems_x')},{validated_data.get('mems_y')},{validated_data.get('mems_z')}) "
             f"fall_detected={validated_data.get('fall_detected')}"
         )
+
+        # Check if cattle is registered and active (ignore unknown or deleted)
+        _db = SessionLocal()
+        try:
+            existing = _db.query(models.Cattle).filter(
+                models.Cattle.cattle_id == cattle_id
+            ).first()
+            if not existing:
+                logger.warning(f"[SENSOR SVC] Dropping packet for unknown cattle: {cattle_id}")
+                return {"status": "dropped", "reason": "unknown_cattle"}
+            if existing.deleted:
+                logger.warning(f"[SENSOR SVC] Dropping packet for deleted cattle: {cattle_id}")
+                return {"status": "dropped", "reason": "deleted_cattle"}
+
+            # Persist real steps to Activity table for today
+            steps_today = validated_data.get("step_count_today")
+            if steps_today is not None:
+                from datetime import datetime, date
+                today_start = datetime.combine(date.today(), datetime.min.time())
+                today_act = _db.query(models.Activity).filter(
+                    models.Activity.cattle_id == cattle_id,
+                    models.Activity.date >= today_start
+                ).first()
+                if today_act:
+                    today_act.steps = int(steps_today)
+                else:
+                    new_act = models.Activity(
+                        cattle_id=cattle_id,
+                        date=datetime.utcnow(),
+                        steps=int(steps_today)
+                    )
+                    _db.add(new_act)
+                _db.commit()
+        except Exception as _e:
+            _db.rollback()
+            logger.warning(f"[SENSOR SVC] DB error updating cattle/activity {cattle_id}: {_e}")
+        finally:
+            _db.close()
         
         reading_id = DatabaseService.save_reading(validated_data)
         preds = self.prediction_service.predict(validated_data)

@@ -28,7 +28,11 @@ class CattleRepository(private val api: CattleApi, private val wsManager: WebSoc
         val wsUrl = "ws://$serverIp:8000/ws/cattle/$cattleId"
         val listener = object : WebSocketListener() {
             override fun onMessage(webSocket: WebSocket, text: String) {
-                _liveData.value = text
+                if (text.contains("\"ping\"") || text.contains("ping")) {
+                    webSocket.send("pong")
+                } else {
+                    _liveData.value = text
+                }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 // Reconnect on failure after a short delay (handled by callers via retry)

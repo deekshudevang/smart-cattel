@@ -101,14 +101,23 @@ class ConnectionManager:
 
         message_str = event.model_dump_json()
         dead_clients = []
+        active_count = len(self.active_connections)
+        logger.info(f"[WS BROADCAST] event_type={event.event_type} cattle_id={event.cattle_id} clients={active_count}")
         
         for client_id, conn in self.active_connections.items():
-            # If event is specific to a cattle_id, only send if client is subscribed or subscribed to all (no cattle_ids)
-            if event.cattle_id and conn.cattle_ids and event.cattle_id not in conn.cattle_ids:
+            # If client subscribed to ALL, CATTLE-ALL, *, or has no cattle_ids, they receive all cattle events
+            subscribed_to_all = (
+                not conn.cattle_ids
+                or "CATTLE-ALL" in conn.cattle_ids
+                or "ALL" in conn.cattle_ids
+                or "*" in conn.cattle_ids
+            )
+            if not subscribed_to_all and event.cattle_id and event.cattle_id not in conn.cattle_ids:
                 continue
                 
             try:
                 await conn.websocket.send_text(message_str)
+                logger.debug(f"[WS BROADCAST SEND] → {client_id}")
             except Exception:
                 dead_clients.append(client_id)
         

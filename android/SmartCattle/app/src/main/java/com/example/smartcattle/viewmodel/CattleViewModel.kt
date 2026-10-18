@@ -71,11 +71,12 @@ class CattleViewModel(private val repository: CattleRepository) : ViewModel() {
     }
 
     // ── WebSocket JSON parsing ──
-    // Backend broadcasts: { "type":"sensor_update", "cattle_id":"...", "data":{...}, "health":{...} }
+    // Backend broadcasts WebSocketEvent: { event_id, event_type, payload: { type:"sensor_update", cattle_id:"...", data:{...}, health:{...} } }
     private fun parseWebSocketMessage(jsonString: String) {
         try {
-            val root = JSONObject(jsonString)
-            val type = root.optString("type")
+            val rawRoot = JSONObject(jsonString)
+            val root = rawRoot.optJSONObject("payload") ?: rawRoot
+            val type = root.optString("type").ifEmpty { rawRoot.optString("event_type") }
 
             when (type) {
                 "status" -> {
@@ -84,39 +85,79 @@ class CattleViewModel(private val repository: CattleRepository) : ViewModel() {
                 }
                 "sensor_update" -> {
                     val data = root.getJSONObject("data")
-                    val health = root.getJSONObject("health")
+                    val health = root.optJSONObject("health") ?: JSONObject()
 
                     fun healthStr(key: String): String =
                         health.optJSONObject(key)?.optString("status") ?: "unknown"
 
                     val fallDetected = root.optBoolean("fall_detected", false) ||
+                            health.optBoolean("fall_detected", false) ||
                             healthStr("mems") == "abnormal"
 
                     fun getIntOrNull(key: String): Int? = if (data.isNull(key)) null else data.optInt(key)
                     fun getFloatOrNull(key: String): Float? = if (data.isNull(key)) null else data.optDouble(key).toFloat()
+                    fun getBooleanOrTrue(key: String): Boolean = if (data.isNull(key)) true else data.optBoolean(key, true)
+
+                    val stepsToday = when {
+                        !data.isNull("step_count_today") -> data.optInt("step_count_today")
+                        !data.isNull("steps_today") -> data.optInt("steps_today")
+                        else -> null
+                    }
+                    val stepsLifetime = when {
+                        !data.isNull("step_count_lifetime") -> data.optInt("step_count_lifetime")
+                        !data.isNull("steps_lifetime") -> data.optInt("steps_lifetime")
+                        else -> null
+                    }
+                    val accelX = when {
+                        !data.isNull("acceleration_x") -> data.optDouble("acceleration_x").toFloat()
+                        !data.isNull("mems_x") -> data.optDouble("mems_x").toFloat()
+                        else -> null
+                    }
+                    val accelY = when {
+                        !data.isNull("acceleration_y") -> data.optDouble("acceleration_y").toFloat()
+                        !data.isNull("mems_y") -> data.optDouble("mems_y").toFloat()
+                        else -> null
+                    }
+                    val accelZ = when {
+                        !data.isNull("acceleration_z") -> data.optDouble("acceleration_z").toFloat()
+                        !data.isNull("mems_z") -> data.optDouble("mems_z").toFloat()
+                        else -> null
+                    }
 
                     _latestData.value = SensorData(
-                        cattleId    = root.optString("cattle_id", "CATTLE-001"),
-                        timestamp   = root.optString("timestamp", ""),
+                        cattleId    = root.optString("cattle_id", rawRoot.optString("cattle_id", "CATTLE-001")),
+                        timestamp   = root.optString("timestamp", rawRoot.optString("timestamp", "")),
                         spo2        = getIntOrNull("spo2"),
-                        heart_rate         = getIntOrNull("heart_rate"),
+                        heart_rate  = getIntOrNull("heart_rate"),
                         temperature = getFloatOrNull("temperature"),
                         humidity    = getFloatOrNull("humidity"),
-                        memsX       = getFloatOrNull("mems_x"),
-                        memsY       = getFloatOrNull("mems_y"),
-                        memsZ       = getFloatOrNull("mems_z"),
+                        memsX       = accelX,
+                        memsY       = accelY,
+                        memsZ       = accelZ,
                         ph          = getFloatOrNull("ph"),
                         ldr         = getIntOrNull("ldr"),
                         fallDetected = fallDetected,
                         health = HealthStatus(
                             spo2        = healthStr("spo2"),
-                            heart_rate         = healthStr("heart_rate"),
+                            heart_rate  = healthStr("heart_rate"),
                             temperature = healthStr("temperature"),
                             mems        = healthStr("mems"),
                             ph          = healthStr("ph"),
                             ldr         = healthStr("ldr"),
-                            overall     = healthStr("overall")
-                        )
+                            overall     = health.optString("overall", "normal")
+                        ),
+                        stepCountToday     = stepsToday,
+                        stepCountLifetime  = stepsLifetime,
+                        accelerationX      = accelX,
+                        accelerationY      = accelY,
+                        accelerationZ      = accelZ,
+                        accelerometerValid = getBooleanOrTrue("accelerometer_valid"),
+                        heartRateValid     = getBooleanOrTrue("heart_rate_valid"),
+                        spo2Valid          = getBooleanOrTrue("spo2_valid"),
+                        temperatureValid   = getBooleanOrTrue("temperature_valid"),
+                        phValid            = getBooleanOrTrue("ph_valid"),
+                        ldrValid           = getBooleanOrTrue("ldr_valid"),
+                        deviceConnected    = getBooleanOrTrue("device_connected")
                     )
                 }
                 "alert" -> {

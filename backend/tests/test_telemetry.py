@@ -74,7 +74,7 @@ def test_null_sensor():
 def test_missing_field():
     validator = TelemetryValidator()
     payload = get_valid_payload()
-    del payload["sequence"]
+    del payload["device_id"]
     
     is_valid, packet, reason = validator.process(payload)
     assert is_valid is False

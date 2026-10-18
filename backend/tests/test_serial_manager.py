@@ -13,6 +13,21 @@ class MockPortInfo:
         self.serial_number = serial_number
         self.hwid = hwid
 
+@pytest.fixture(autouse=True)
+def reset_serial_manager():
+    manager = SerialManager()
+    manager.connected = False
+    manager.ser = None
+    manager.port = None
+    manager.device_info = None
+    manager.errors = 0
+    yield
+    manager.connected = False
+    manager.ser = None
+    manager.port = None
+    manager.device_info = None
+    manager.errors = 0
+
 def test_detect_configured_arduino():
     manager = SerialManager(fallback_port="COM6")
     

@@ -12,3 +12,5 @@ pydantic-settings
 pytest
 slowapi
 python-multipart
+redis
+psycopg2-binary

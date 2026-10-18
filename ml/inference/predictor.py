@@ -25,8 +25,13 @@ class HealthPredictor:
         if not self.model or not self.metadata:
             raise RuntimeError("Model or metadata not found. Cannot predict.")
             
-        features = self.metadata["features"]
-        labels = self.metadata["labels"]
+        features = self.metadata.get("features", [
+            "spo2", "heart_rate", "temperature", "humidity",
+            "mems_x", "mems_y", "mems_z", "acceleration_magnitude",
+            "ph", "ldr", "activity", "temp_baseline_dev",
+            "hr_baseline_dev", "spo2_baseline_dev", "activity_baseline_dev"
+        ])
+        labels = self.metadata.get("labels", ["overall_status"])
         
         # 1. Feature Engineering
         if "mems_x" in sensor_data and "mems_y" in sensor_data and "mems_z" in sensor_data:
@@ -49,9 +54,11 @@ class HealthPredictor:
             
         # 3. Predict
         try:
-            pred = self.model.predict([vector])[0]
+            import pandas as pd
+            df = pd.DataFrame([vector], columns=features)
+            pred = self.model.predict(df)[0]
             if hasattr(self.model, "predict_proba"):
-                proba = self.model.predict_proba([vector])[0]
+                proba = self.model.predict_proba(df)[0]
                 confidence = round(float(max(proba)), 2)
             else:
                 confidence = 0.85

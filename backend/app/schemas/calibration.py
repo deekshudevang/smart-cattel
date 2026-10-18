@@ -22,4 +22,4 @@ class PHCalibrationResponse(BaseModel):
     performed_by: Optional[str] = None
     
     class Config:
-        orm_mode = True
+        from_attributes = True

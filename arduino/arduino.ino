@@ -2,6 +2,7 @@
 #include <DHT.h>
 #include <Wire.h>
 #include "filters.h"
+#include "step_counter.h"
 #include <MAX30105.h>
 #include <TinyGPS++.h>
 #include <LiquidCrystal.h>
@@ -9,6 +10,8 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
 #include <EEPROM.h>
+
+CowStepCounter step_counter;
 // DIAGNOSTIC BUILD — MAX30102 I2C scan + raw IR/RED output enabled
 #define DEBUG_MAX30102 1 // Set to 1 to enable MAX30102 debug output
 
@@ -191,13 +194,21 @@ void setup() {
     Serial.print(" ADC="); Serial.println(adcRange);
   }
 
-  if (accel.begin()) {
+  step_counter.begin();
+  Serial.print(F("[STEP] Restored today=")); Serial.print(step_counter.steps_today);
+  Serial.print(F(" lifetime=")); Serial.println(step_counter.steps_lifetime);
+
+  if (accel.begin(0x53)) {
     adxl_valid = true;
     accel.setRange(ADXL345_RANGE_2_G);
-    Serial.println("[ADXL345] Initialized");
+    Serial.println(F("[ADXL345] Initialized at 0x53"));
+  } else if (accel.begin(0x1D)) {
+    adxl_valid = true;
+    accel.setRange(ADXL345_RANGE_2_G);
+    Serial.println(F("[ADXL345] Initialized at 0x1D"));
   } else {
     adxl_valid = false;
-    Serial.println("[ADXL345] Not found");
+    Serial.println(F("[ADXL345] Not found at 0x53 or 0x1D (will re-probe)"));
   }
 
   dht.begin();
@@ -220,13 +231,42 @@ void setup() {
 }
 
 void loop() {
-  // ---------- ADXL345 Read ----------
-  if (adxl_valid) {
-    sensors_event_t event;
-    accel.getEvent(&event);
-    xValue = event.acceleration.x;
-    yValue = event.acceleration.y;
-    zValue = event.acceleration.z;
+  // ---------- ADXL345 Continuous Sampling (~25Hz / 40ms) & Auto-Reconnection ----------
+  static unsigned long last_adxl_probe = 0;
+  if (!adxl_valid && millis() - last_adxl_probe >= 4000) {
+    last_adxl_probe = millis();
+    if (accel.begin(0x53)) {
+      adxl_valid = true;
+      accel.setRange(ADXL345_RANGE_2_G);
+      Serial.println(F("[ADXL345] Reconnected at 0x53"));
+    } else if (accel.begin(0x1D)) {
+      adxl_valid = true;
+      accel.setRange(ADXL345_RANGE_2_G);
+      Serial.println(F("[ADXL345] Reconnected at 0x1D"));
+    }
+  }
+
+  static unsigned long last_accel_sample = 0;
+  if (millis() - last_accel_sample >= 40) {
+    last_accel_sample = millis();
+    if (adxl_valid) {
+      sensors_event_t event;
+      accel.getEvent(&event);
+      xValue = event.acceleration.x;
+      yValue = event.acceleration.y;
+      if (step_counter.processSample(xValue, yValue, zValue, millis())) {
+        Serial.print(F("[STEP] Step detected! Ax="));
+        Serial.print(xValue, 2);
+        Serial.print(F(" Ay="));
+        Serial.print(yValue, 2);
+        Serial.print(F(" Az="));
+        Serial.print(zValue, 2);
+        Serial.print(F(" Today="));
+        Serial.print(step_counter.steps_today);
+        Serial.print(F(" Lifetime="));
+        Serial.println(step_counter.steps_lifetime);
+      }
+    }
   }
 
   // ---------- DHT11 Read ----------
@@ -264,8 +304,10 @@ void loop() {
   ldrValue = analogRead(LDR_PIN);
   ldr_valid = true; // LDR is analog, usually valid
 
-  // ---------- GPS Read ----------
-  smartDelay(50);
+  // ---------- GPS Read (100% Non-Blocking) ----------
+  while (GPS_SERIAL.available()) {
+    gps.encode(GPS_SERIAL.read());
+  }
   if (gps.location.isValid()) {
     LAT = String(gps.location.lat(), 6);
     LON = String(gps.location.lng(), 6);
@@ -429,21 +471,20 @@ void loop() {
                 } else {
                   displayState = "UNSTABLE";
                 }
-                displayBPMValid = false;
-                displaySpO2Valid = false;
+                // Keep the last valid values instead of setting to false on single noisy peak
                 displayBPMQuality = quality;
                 displaySpO2Quality = quality;
 #if DEBUG_MAX30102
-                Serial.println("[MAX30102] Signal invalid or noisy, values set to null");
+                Serial.println("[MAX30102] Signal invalid or noisy, retaining previous values");
 #endif
               }
             }
           }
           stat_red.reset();
           stat_ir.reset();
+          crossed = false;
+          last_heartbeat = crossed_time;
         }
-        crossed = false;
-        last_heartbeat = crossed_time;
       }
       last_diff = current_diff;
     }
@@ -473,7 +514,10 @@ void loop() {
       else lcd.print("--");
 
       lcd.setCursor(0, 1);
-      lcd.print("p:");
+      lcd.print("ST:");
+      lcd.print(step_counter.steps_today);
+      
+      lcd.print(" p:");
       if (ph_valid) lcd.print(ph_value, 1);
       else lcd.print("--");
       
@@ -483,104 +527,133 @@ void loop() {
         lcd.print(dispLdr);
       }
       else lcd.print("--");
-      
-      lcd.print(" X:");
-      if (adxl_valid) lcd.print(xValue, 1);
-      else lcd.print("--");
     } else {
-      lcd.print("SpO2:");
-      if (max_valid && finger_detected && displaySpO2 > 0) lcd.print(displaySpO2);
-      else lcd.print("--");
-      lcd.print("%");
+      lcd.print("Steps:");
+      lcd.print(step_counter.steps_today);
+      lcd.print(" Tot:");
+      lcd.print(step_counter.steps_lifetime);
       
       lcd.setCursor(0, 1);
-      lcd.print("Temp:");
-      if (dht_valid) lcd.print(temperature, 1);
+      lcd.print("X:");
+      if (adxl_valid) lcd.print(xValue, 1);
       else lcd.print("--");
-      lcd.print("C");
+      lcd.print(" Y:");
+      if (adxl_valid) lcd.print(yValue, 1);
+      else lcd.print("--");
+      lcd.print(" Z:");
+      if (adxl_valid) lcd.print(zValue, 1);
+      else lcd.print("--");
     }
     show_page_1 = !show_page_1;
 
-    // 2. Build JSON
+    // 2. Build Standardized JSON Telemetry
     static unsigned long sequence_counter = 0;
     sequence_counter++;
 
-    String json = "{";
-    json += "\"protocol_version\":1,";
-    json += "\"device_id\":\"SC-001\",";
-    json += "\"sequence\":" + String(sequence_counter) + ",";
-    json += "\"timestamp\":" + String(millis()) + ",";
-    
-    // MAX30102 — null when no valid reading, never fake
     bool hr_ok   = max_valid && finger_detected && displayBPMValid;
     bool spo2_ok = max_valid && finger_detected && displaySpO2Valid;
-    
     if (!max_valid) displayState = "NO_SENSOR";
-    json += "\"max_state\":\"" + displayState + "\",";
-    
-    json += spo2_ok ? ("\"spo2\":" + String(displaySpO2) + ",") : "\"spo2\":null,";
-    json += "\"spo2_valid\":" + String(spo2_ok ? "true" : "false") + ",";
-    json += "\"spo2_quality\":" + String(displaySpO2Quality, 2) + ",";
-    
-    json += hr_ok   ? ("\"bpm\":"  + String(displayBPM)  + ",") : "\"bpm\":null,";
-    json += "\"bpm_valid\":" + String(hr_ok ? "true" : "false") + ",";
-    json += "\"bpm_quality\":" + String(displayBPMQuality, 2) + ",";
 
+    Serial.print("{");
+    Serial.print("\"protocol_version\":1,");
+    Serial.print("\"cattle_id\":\""); Serial.print(CATTLE_ID); Serial.print("\",");
+    Serial.print("\"device_id\":\"SC-001\",");
+    Serial.print("\"sequence\":"); Serial.print(sequence_counter); Serial.print(",");
+    Serial.print("\"timestamp\":"); Serial.print(millis()); Serial.print(",");
+    Serial.print("\"device_connected\":true,");
 
-    // DHT11
-    if (dht_valid) {
-      json += "\"temperature\":" + String(temperature, 1) + ",";
-      json += "\"temperature_valid\":true,";
-      json += "\"humidity\":" + String(humidity, 1) + ",";
-      json += "\"humidity_valid\":true,";
-    } else {
-      json += "\"temperature\":null,";
-      json += "\"temperature_valid\":false,";
-      json += "\"humidity\":null,";
-      json += "\"humidity_valid\":false,";
-    }
-    json += "\"sensor_quality\":" + String(dht_sensor_quality, 2) + ",";
-    json += "\"last_successful_read\":" + String(dht_last_successful_read) + ",";
+    // Steps (today & lifetime)
+    Serial.print("\"step_count_today\":"); Serial.print(step_counter.steps_today); Serial.print(",");
+    Serial.print("\"step_count_lifetime\":"); Serial.print(step_counter.steps_lifetime); Serial.print(",");
 
-    // ADXL345
+    // Accelerometer / MEMS (ADXL345)
+    Serial.print("\"accelerometer_valid\":"); Serial.print(adxl_valid ? "true," : "false,");
     if (adxl_valid) {
-      json += "\"mems_x\":" + String(xValue, 1) + ",";
-      json += "\"mems_y\":" + String(yValue, 1) + ",";
-      json += "\"mems_z\":" + String(zValue, 1) + ",";
-      json += "\"mems_valid\":true,";
+      Serial.print("\"acceleration_x\":"); Serial.print(xValue, 2); Serial.print(",");
+      Serial.print("\"acceleration_y\":"); Serial.print(yValue, 2); Serial.print(",");
+      Serial.print("\"acceleration_z\":"); Serial.print(zValue, 2); Serial.print(",");
+      // legacy aliases
+      Serial.print("\"mems_x\":"); Serial.print(xValue, 2); Serial.print(",");
+      Serial.print("\"mems_y\":"); Serial.print(yValue, 2); Serial.print(",");
+      Serial.print("\"mems_z\":"); Serial.print(zValue, 2); Serial.print(",");
+      Serial.print("\"mems_valid\":true,");
     } else {
-      json += "\"mems_x\":null,";
-      json += "\"mems_y\":null,";
-      json += "\"mems_z\":null,";
-      json += "\"mems_valid\":false,";
+      Serial.print("\"acceleration_x\":null,");
+      Serial.print("\"acceleration_y\":null,");
+      Serial.print("\"acceleration_z\":null,");
+      // legacy aliases
+      Serial.print("\"mems_x\":null,");
+      Serial.print("\"mems_y\":null,");
+      Serial.print("\"mems_z\":null,");
+      Serial.print("\"mems_valid\":false,");
     }
 
-    // pH
+    // Heart Rate & SpO2 (MAX30102)
+    Serial.print("\"max_state\":\""); Serial.print(displayState); Serial.print("\",");
+    Serial.print("\"heart_rate_valid\":"); Serial.print(hr_ok ? "true," : "false,");
+    Serial.print("\"bpm_valid\":"); Serial.print(hr_ok ? "true," : "false,");
+    if (hr_ok) {
+      Serial.print("\"heart_rate_bpm\":"); Serial.print(displayBPM); Serial.print(",");
+      Serial.print("\"bpm\":"); Serial.print(displayBPM); Serial.print(",");
+    } else {
+      Serial.print("\"heart_rate_bpm\":null,");
+      Serial.print("\"bpm\":null,");
+    }
+    Serial.print("\"bpm_quality\":"); Serial.print(displayBPMQuality, 2); Serial.print(",");
+
+    Serial.print("\"spo2_valid\":"); Serial.print(spo2_ok ? "true," : "false,");
+    if (spo2_ok) {
+      Serial.print("\"spo2_percent\":"); Serial.print(displaySpO2); Serial.print(",");
+      Serial.print("\"spo2\":"); Serial.print(displaySpO2); Serial.print(",");
+    } else {
+      Serial.print("\"spo2_percent\":null,");
+      Serial.print("\"spo2\":null,");
+    }
+    Serial.print("\"spo2_quality\":"); Serial.print(displaySpO2Quality, 2); Serial.print(",");
+
+    // Temperature & Humidity (DHT11)
+    Serial.print("\"temperature_valid\":"); Serial.print(dht_valid ? "true," : "false,");
+    if (dht_valid) {
+      Serial.print("\"temperature_c\":"); Serial.print(temperature, 1); Serial.print(",");
+      Serial.print("\"temperature\":"); Serial.print(temperature, 1); Serial.print(",");
+      Serial.print("\"humidity\":"); Serial.print(humidity, 1); Serial.print(",");
+      Serial.print("\"humidity_valid\":true,");
+    } else {
+      Serial.print("\"temperature_c\":null,");
+      Serial.print("\"temperature\":null,");
+      Serial.print("\"humidity\":null,");
+      Serial.print("\"humidity_valid\":false,");
+    }
+    Serial.print("\"sensor_quality\":"); Serial.print(dht_sensor_quality, 2); Serial.print(",");
+    Serial.print("\"last_successful_read\":"); Serial.print(dht_last_successful_read); Serial.print(",");
+
+    // pH Sensor
+    Serial.print("\"ph_valid\":"); Serial.print(ph_valid ? "true," : "false,");
     if (ph_valid) {
-      json += "\"ph\":" + String(ph_value, 2) + ",";
-      json += "\"ph_valid\":true,";
+      Serial.print("\"ph_value\":"); Serial.print(ph_value, 2); Serial.print(",");
+      Serial.print("\"ph\":"); Serial.print(ph_value, 2); Serial.print(",");
     } else {
-      json += "\"ph\":null,";
-      json += "\"ph_valid\":false,";
+      Serial.print("\"ph_value\":null,");
+      Serial.print("\"ph\":null,");
     }
 
-    // LDR
+    // LDR Sensor
+    Serial.print("\"ldr_valid\":"); Serial.print(ldr_valid ? "true," : "false,");
     if (ldr_valid) {
-      json += "\"ldr\":" + String(ldrValue) + ",";
-      json += "\"ldr_valid\":true,";
+      Serial.print("\"ldr_value\":"); Serial.print(ldrValue); Serial.print(",");
+      Serial.print("\"ldr\":"); Serial.print(ldrValue); Serial.print(",");
     } else {
-      json += "\"ldr\":null,";
-      json += "\"ldr_valid\":false,";
+      Serial.print("\"ldr_value\":null,");
+      Serial.print("\"ldr\":null,");
     }
     
     // GPS
-    json += "\"gps_valid\":" + String(gps.location.isValid() ? "true" : "false") + ",";
-    json += "\"gps_lat\":" + LAT + ",";
-    json += "\"gps_lon\":" + LON + ",";
-    json += "\"gps_satellites\":" + String(gps.satellites.isValid() ? gps.satellites.value() : 0);
+    Serial.print("\"gps_valid\":"); Serial.print(gps.location.isValid() ? "true," : "false,");
+    Serial.print("\"gps_lat\":"); Serial.print(LAT); Serial.print(",");
+    Serial.print("\"gps_lon\":"); Serial.print(LON); Serial.print(",");
+    Serial.print("\"gps_satellites\":"); Serial.print(gps.satellites.isValid() ? gps.satellites.value() : 0);
     
-    json += "}";
-    Serial.println(json);
+    Serial.println("}");
   }
 
   // ---------- RECEIVE ML RESULT OR COMMANDS FROM PYTHON ----------
@@ -588,7 +661,18 @@ void loop() {
     String data = Serial.readStringUntil('\n');
     data.trim();
     
-    if (data.startsWith("CAL_PH:")) {
+    if (data.startsWith("RESET_DAY")) {
+      step_counter.resetToday();
+      Serial.println(F("{\"event\":\"reset_day\",\"status\":\"ok\"}"));
+    } else if (data.startsWith("SYNC_STEPS:")) {
+      int comma = data.indexOf(',');
+      if (comma != -1) {
+        uint32_t t_steps = data.substring(11, comma).toInt();
+        uint32_t l_steps = data.substring(comma + 1).toInt();
+        step_counter.syncCounts(t_steps, l_steps);
+        Serial.println(F("{\"event\":\"sync_steps\",\"status\":\"ok\"}"));
+      }
+    } else if (data.startsWith("CAL_PH:")) {
       int commaIdx = data.indexOf(',');
       if (commaIdx != -1) {
         float v4 = data.substring(7, commaIdx).toFloat();
