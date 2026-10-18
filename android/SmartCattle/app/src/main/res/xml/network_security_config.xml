@@ -1,24 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- By default in production, cleartext HTTP traffic is disabled -->
+    <!-- Production Network Security Configuration: Disallows cleartext HTTP traffic globally -->
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
-
-    <!-- Development and LAN overrides for connecting to local FastAPI server -->
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">10.0.2.2</domain>
-        <domain includeSubdomains="true">127.0.0.1</domain>
-        <domain includeSubdomains="true">localhost</domain>
-    </domain-config>
-
-    <!-- Debug overrides for local developer Wi-Fi LAN testing -->
-    <debug-overrides>
-        <trust-anchors>
-            <certificates src="system" />
-            <certificates src="user" />
-        </trust-anchors>
-    </debug-overrides>
 </network-security-config>

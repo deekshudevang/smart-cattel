@@ -23,15 +23,26 @@ class DatabaseService:
             filtered_data = {k: v for k, v in data.items() if k in valid_keys}
             
             ts = filtered_data.get("timestamp")
-            from datetime import datetime, date
+            from datetime import datetime, date, timezone
             if ts is not None and not isinstance(ts, (datetime, date)):
                 try:
                     ts_float = float(ts)
                     if ts_float > 1e10:
                         ts_float = ts_float / 1000.0
-                    filtered_data["timestamp"] = datetime.fromtimestamp(ts_float)
+                    if ts_float < 1_000_000_000:
+                        # Arduino uptime millis, not epoch timestamp
+                        filtered_data["timestamp"] = datetime.now(timezone.utc)
+                    else:
+                        filtered_data["timestamp"] = datetime.fromtimestamp(ts_float)
                 except (ValueError, TypeError):
-                    del filtered_data["timestamp"]
+                    filtered_data["timestamp"] = datetime.now(timezone.utc)
+            elif ts is None:
+                filtered_data["timestamp"] = datetime.now(timezone.utc)
+
+            filtered_data.setdefault("source", data.get("source", "serial"))
+            filtered_data.setdefault("is_simulated", data.get("is_simulated", False))
+            filtered_data.setdefault("raw_packet", data.get("raw_packet"))
+            filtered_data.setdefault("checksum_valid", data.get("checksum_valid", True))
                 
             reading = models.SensorReading(**filtered_data)
             db.add(reading)
@@ -126,6 +137,8 @@ class AlertService:
             "cattle_id": cattle_id,
             "data": data,
             "health": health_with_overall,
+            "source": data.get("source", "serial"),
+            "is_simulated": data.get("is_simulated", False),
         }
         import logging as _log
         _logger = _log.getLogger("alert_service")
@@ -394,6 +407,8 @@ class SensorService:
         for sensor, pred in preds.items():
             if pred.get("status") == "abnormal" and sensor in mapping:
                 val = validated_data.get(sensor)
+                if val is None:
+                    continue
                 s_payload = await EngineAlertService.process_alert_async(
                     cattle_id=cattle_id,
                     device_id=validated_data.get("device_id", "UNKNOWN"),

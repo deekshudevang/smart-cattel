@@ -164,6 +164,9 @@ interface CattleApi {
 
     @GET("/api/activity/{id}")
     suspend fun getActivity(@Path("id") id: String): List<ActivityResponse>
+
+    @retrofit2.http.DELETE("/api/cows/{id}")
+    suspend fun deleteCow(@Path("id") id: String): retrofit2.Response<Unit>
 }
 
 // Mappers — convert raw API shapes to clean domain models

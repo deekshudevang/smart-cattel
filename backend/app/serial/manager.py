@@ -322,8 +322,12 @@ class SerialManager:
                                 self.last_packet = datetime.now()
                                 self.packets_received += 1
                                 if self.on_data_callback:
-                                    # Pass the validated Pydantic model dictionary
-                                    self.on_data_callback(packet.model_dump())
+                                    pkt_dict = packet.model_dump()
+                                    pkt_dict["source"] = "serial"
+                                    pkt_dict["is_simulated"] = False
+                                    pkt_dict["raw_packet"] = line
+                                    pkt_dict["checksum_valid"] = True
+                                    self.on_data_callback(pkt_dict)
                             else:
                                 self.packets_rejected += 1
                                 logger.warning(f"Packet rejected ({reason}): {line}")

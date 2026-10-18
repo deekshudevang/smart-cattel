@@ -47,30 +47,41 @@ The packet includes an XOR-8 checksum (`chk`) calculated over all bytes precedin
 }
 ```
 
-### Field Definitions & Ranges
+### Canonical Telemetry Field Definitions & Valid Ranges
 
-| Field Name | Type | Units | Valid Physical Range | Nullable | Description / Invalid Handling |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `protocol_version` | integer | - | `1` | No | Protocol version identifier. |
-| `cattle_id` | string | - | Non-empty string | No | Unique cattle ID (e.g., `CATTLE-001`). |
-| `device_id` | string | - | Non-empty string | No | Physical device/collar ID (e.g., `SC-001`). |
-| `boot_count` | integer | count | `>= 0` | Yes | Wear-leveled persistent boot counter from EEPROM. |
-| `sequence` | integer | count | `0 - 65535` | No | Incremental packet sequence number. |
-| `timestamp` | integer | ms | `>= 0` | No | Millis uptime from Arduino loop. |
-| `step_count_lifetime`| integer | count | `>= 0` | No | Persistent lifetime steps from wear-leveled EEPROM. |
-| `heart_rate` / `bpm` | integer | bpm | `20 - 300` | Yes | Heart rate from MAX30102. `null` if no finger/hide contact. |
-| `spo2` | integer | % | `30 - 100` | Yes | Blood oxygen saturation. `null` if no hide contact. |
-| `temperature` | float | °C | `-20.0 - 80.0` | Yes | Ambient/body temperature from DHT11. `null` if disconnect. |
-| `ph` | float | pH | `0.0 - 14.0` | Yes | Water/feed pH level. `null` if disconnected. |
-| `ldr` | integer | ADC (0-1023) | `0 - 1024` | Yes | Ambient light intensity. `null` if disconnected. |
-| `ax`, `ay`, `az` | float | g (9.81 m/s²) | `-16.0 - 16.0` | Yes | 3-axis acceleration from ADXL345. |
-| `mems_valid` | boolean | flag | `0 or 1` | No | Accelerometer validity flag. |
-| `hr_valid` | boolean | flag | `0 or 1` | No | Heart rate sensor validity flag. |
-| `spo2_valid` | boolean | flag | `0 or 1` | No | SpO2 validity flag. |
-| `temp_valid` | boolean | flag | `0 or 1` | No | Temperature sensor validity flag. |
-| `ph_valid` | boolean | flag | `0 or 1` | No | pH sensor validity flag. |
-| `ldr_valid` | boolean | flag | `0 or 1` | No | LDR sensor validity flag. |
-| `chk` | integer | byte | `0 - 255` | Yes | 8-bit XOR checksum of characters preceding `,"chk":`. |
+| Canonical Field | Deprecated Aliases (Sunset: 2026-12-31) | Type | Units | Valid Range | Nullable | Description / Invalid Handling |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `protocol_version` | - | integer | - | `1` | No | Protocol version identifier. |
+| `cattle_id` | - | string | - | Non-empty string | No | Unique cattle ID (e.g., `CATTLE-001`). |
+| `device_id` | - | string | - | Non-empty string | No | Physical device/collar ID (e.g., `SC-001`). |
+| `sequence` | - | integer | count | `0 - 65535` | No | Incremental packet sequence number. |
+| `timestamp` | - | integer | ms | `>= 0` | No | Millis uptime from Arduino loop or epoch seconds. |
+| `step_count_today` | `steps_today` | integer | count | `>= 0` | Yes | Daily steps calculated authoritatively by backend. |
+| `step_count_lifetime`| `lifetime_steps` | integer | count | `>= 0` | No | Persistent lifetime steps from wear-leveled EEPROM. |
+| `boot_count` | - | integer | count | `>= 0` | Yes | Wear-leveled persistent boot counter from EEPROM. |
+| `heart_rate` | `heart_rate_bpm`, `bpm` | float | bpm | `20 - 300` | Yes | Heart rate from MAX30102. `null` if no hide contact. |
+| `heart_rate_valid` | `bpm_valid`, `hr_valid` | boolean | flag | `true / false` | No | Heart rate sensor validity flag. |
+| `spo2` | `spo2_percent` | float | % | `30 - 100` | Yes | Blood oxygen saturation. `null` if no hide contact. |
+| `spo2_valid` | - | boolean | flag | `true / false` | No | SpO2 validity flag. |
+| `temperature` | `temperature_c` | float | °C | `-20.0 - 80.0` | Yes | Ambient/body temperature from DHT11. `null` if disconnect. |
+| `temperature_valid` | `temp_valid` | boolean | flag | `true / false` | No | Temperature sensor validity flag. |
+| `humidity` | - | float | %RH | `0.0 - 100.0` | Yes | Relative humidity from DHT11. |
+| `humidity_valid` | - | boolean | flag | `true / false` | No | Humidity validity flag. |
+| `ph` | `ph_value` | float | pH | `0.0 - 14.0` | Yes | Water/feed pH level. `null` if disconnected. |
+| `ph_valid` | - | boolean | flag | `true / false` | No | pH sensor validity flag. |
+| `ldr` | `ldr_value` | float | ADC (0-1023) | `0 - 1024` | Yes | Ambient light intensity. `null` if disconnected (0 preserved). |
+| `ldr_valid` | - | boolean | flag | `true / false` | No | LDR sensor validity flag. |
+| `acceleration_x` | `mems_x`, `ax` | float | m/s² (or g) | `-16.0 - 16.0` | Yes | X-axis acceleration from ADXL345. |
+| `acceleration_y` | `mems_y`, `ay` | float | m/s² (or g) | `-16.0 - 16.0` | Yes | Y-axis acceleration from ADXL345. |
+| `acceleration_z` | `mems_z`, `az` | float | m/s² (or g) | `-16.0 - 16.0` | Yes | Z-axis acceleration from ADXL345. |
+| `accelerometer_valid`| `mems_valid` | boolean | flag | `true / false` | No | Accelerometer validity flag. |
+| `chk` | - | integer | byte | `0 - 255` | Yes | 8-bit XOR checksum of characters preceding `,"chk":`. |
+
+### Deprecation Path & Compatibility Policy
+- **Canonical Model:** All database models (`models.SensorReading`), WebSocket broadcast packets, and API response DTOs use only the canonical names listed above.
+- **Input Compatibility:** The backend Pydantic model (`TelemetryPacket`) accepts legacy aliases via its `@model_validator(mode="before")` and transparently populates the canonical fields.
+- **Python Code Compatibility:** `TelemetryPacket` provides deprecated `@property` accessors for `bpm`, `heart_rate_bpm`, `bpm_valid`, `spo2_percent`, `temperature_c`, `ph_value`, `ldr_value`, `mems_x`, `mems_y`, `mems_z`, and `mems_valid`.
+- **Sunset Date:** Legacy aliases will be fully removed on **2026-12-31**. All new sensors, firmware builds, and API clients must send and consume canonical names.
 
 ---
 

@@ -130,28 +130,25 @@ bool crossed = false;
 long crossed_time = 0;
 
 void i2c_scan() {
-  Serial.println("[I2C] Scanning...");
-  int count = 0;
-  for (byte addr = 1; addr < 127; addr++) {
-    Wire.beginTransmission(addr);
-    if (Wire.endTransmission() == 0) {
-      Serial.print("[I2C] Found device at 0x");
-      if (addr < 16) Serial.print("0");
-      Serial.println(addr, HEX);
-      count++;
-    }
-  }
-  if (count == 0) {
-    Serial.println("[I2C] No devices found — check SDA/SCL wiring");
-  }
+  Serial.println("[I2C] Probing sensors (0x57 MAX30102, 0x53/0x1D ADXL345)...");
   Wire.beginTransmission(0x57);
   bool has_max = (Wire.endTransmission() == 0);
   if (has_max) {
     Serial.println("[MAX30102] Device detected: YES at 0x57");
   } else {
-    Serial.println("[MAX30102] Device detected: NO");
-    Serial.println("[MAX30102] Arduino Mega I2C: SDA=Pin20, SCL=Pin21");
-    Serial.println("[MAX30102] Check VCC(3.3V/5V), GND, SDA, SCL connections");
+    Serial.println("[MAX30102] Device detected: NO at 0x57");
+  }
+
+  Wire.beginTransmission(0x53);
+  bool has_adxl53 = (Wire.endTransmission() == 0);
+  Wire.beginTransmission(0x1D);
+  bool has_adxl1d = (Wire.endTransmission() == 0);
+  if (has_adxl53) {
+    Serial.println("[ADXL345] Device detected: YES at 0x53");
+  } else if (has_adxl1d) {
+    Serial.println("[ADXL345] Device detected: YES at 0x1D");
+  } else {
+    Serial.println("[ADXL345] Device detected: NO at 0x53 or 0x1D");
   }
 }
 
@@ -295,6 +292,7 @@ void setup() {
   lcd_showing_waiting = true;
 
   Wire.begin();
+  Wire.setWireTimeout(25000, true);
   Serial.println("[MAX30102] Initializing...");
   i2c_scan();
 
@@ -443,15 +441,23 @@ void loop() {
     LON = String(gps.location.lng(), 6);
   }
 
-  // ---------- pH Read ----------
+  // ---------- pH Read (with floating pin detection) ----------
+  pinMode(PH_PIN, INPUT_PULLUP);
+  delayMicroseconds(20);
+  int ph_pullup = analogRead(PH_PIN);
+  pinMode(PH_PIN, INPUT);
+  delayMicroseconds(20);
   ph_raw = analogRead(PH_PIN);
+  
+  // If pin is floating (no probe attached), internal pullup charges it to ~1023
+  bool ph_floating = (ph_pullup >= 1010 && abs(ph_pullup - ph_raw) > 25);
   float raw_voltage = ph_raw * (5.0 / 1023.0);
   
   // Smoothing/Filtering
   ph_voltage = averager_ph.process(raw_voltage);
   
-  // Detect disconnected sensor (e.g., < 0.1V or > 4.9V)
-  if (ph_voltage < 0.1 || ph_voltage > 4.9) {
+  // Detect disconnected or floating sensor (e.g. floating pin or < 0.2V or > 4.8V)
+  if (ph_floating || ph_voltage < 0.2 || ph_voltage > 4.8) {
     ph_valid = false;
     ph_value = NAN;
   } else {
@@ -632,8 +638,8 @@ void loop() {
 
     // Physiological validity checks
     bool accel_ok = adxl_valid;
-    bool hr_ok    = max_valid && finger_detected && displayBPMValid && (displayBPM >= 30 && displayBPM <= 220);
-    bool spo2_ok  = max_valid && finger_detected && displaySpO2Valid && (displaySpO2 >= 50 && displaySpO2 <= 100);
+    bool hr_ok    = max_valid && finger_detected && displayBPMValid && (displayBPM >= 30 && displayBPM <= 220) && (millis() - last_heartbeat < 3000);
+    bool spo2_ok  = max_valid && finger_detected && displaySpO2Valid && (displaySpO2 >= 50 && displaySpO2 <= 100) && (millis() - last_heartbeat < 3000);
     bool temp_ok  = dht_valid && (!isnan(temperature)) && (temperature >= -10.0f && temperature <= 60.0f);
     bool ph_ok    = ph_valid && (ph_value >= 0.0f && ph_value <= 14.0f);
     bool ldr_ok   = ldr_valid && (ldrValue >= 0 && ldrValue <= 1023);
@@ -789,10 +795,20 @@ void loop() {
     }
     
     // GPS
-    cp.print(F("\"gps_valid\":")); cp.print(gps.location.isValid() ? F("true,") : F("false,"));
-    cp.print(F("\"gps_lat\":")); cp.print(LAT); cp.print(F(","));
-    cp.print(F("\"gps_lon\":")); cp.print(LON); cp.print(F(","));
-    cp.print(F("\"gps_satellites\":")); cp.print(gps.satellites.isValid() ? gps.satellites.value() : 0);
+    bool gps_loc_valid = gps.location.isValid();
+    cp.print(F("\"gps_valid\":")); cp.print(gps_loc_valid ? F("true,") : F("false,"));
+    if (gps_loc_valid) {
+      cp.print(F("\"gps_lat\":")); cp.print(LAT); cp.print(F(","));
+      cp.print(F("\"gps_lon\":")); cp.print(LON); cp.print(F(","));
+    } else {
+      cp.print(F("\"gps_lat\":null,"));
+      cp.print(F("\"gps_lon\":null,"));
+    }
+    if (gps.satellites.isValid()) {
+      cp.print(F("\"gps_satellites\":")); cp.print(gps.satellites.value());
+    } else {
+      cp.print(F("\"gps_satellites\":null"));
+    }
     
     // Checksum of all preceding bytes
     Serial.print(F(",\"chk\":"));

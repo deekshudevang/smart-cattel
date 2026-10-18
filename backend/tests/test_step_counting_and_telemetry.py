@@ -193,6 +193,10 @@ def test_database_persistence_of_steps():
         assert act.steps == 342
 
     finally:
+        db.query(models.Activity).filter(models.Activity.cattle_id == "TEST-COW-99").delete()
+        db.query(models.SensorReading).filter(models.SensorReading.cattle_id == "TEST-COW-99").delete()
+        db.query(models.Cattle).filter(models.Cattle.cattle_id == "TEST-COW-99").delete()
+        db.commit()
         db.close()
 
 

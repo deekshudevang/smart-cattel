@@ -110,11 +110,19 @@ class SensorReading(Base, BaseMixin):
     gps_satellites = Column(Integer, nullable=True)
     gsm_status = Column(String, nullable=True)
     
+    # Data Source & Provenance
+    source = Column(String, default="serial", index=True)
+    is_simulated = Column(Boolean, default=False, index=True)
+    raw_packet = Column(String, nullable=True)
+    checksum_valid = Column(Boolean, default=True)
+
     cattle = relationship("Cattle", back_populates="sensor_readings")
     prediction = relationship("Prediction", back_populates="reading", uselist=False)
 
     __table_args__ = (
         Index('idx_cattle_timestamp', 'cattle_id', 'timestamp'),
+        Index('idx_sensor_readings_is_simulated', 'is_simulated'),
+        Index('idx_sensor_readings_cattle_sim', 'cattle_id', 'is_simulated', 'timestamp'),
     )
 
 class Prediction(Base, BaseMixin):

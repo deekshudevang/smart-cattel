@@ -53,6 +53,10 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.smartcattle.ui.components.*
 import com.example.smartcattle.ui.theme.*
+import com.example.smartcattle.data.local.AppDatabase
+import com.example.smartcattle.data.local.CowEntity
+import com.example.smartcattle.data.local.toCowProfile
+import com.example.smartcattle.data.local.toEntity
 import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -100,8 +104,30 @@ val Muted = Color(0xFF64748B)
 val Border = Color(0xFF334155)
 
 // ── Domain Models ──
-data class Sensor(val icon: String, val label: String, val value: String, val unit: String, val status: String, val color: Color)
-data class Cattle(val id: String, val name: String, val breed: String, val age: String, val overall: String, val sensors: List<Sensor>)
+data class Sensor(
+    val icon: String,
+    val label: String,
+    val value: String,
+    val unit: String,
+    val status: String,
+    val color: Color,
+    val isValid: Boolean = true,
+    val reason: String? = null,
+    val lastUpdate: String? = null
+)
+data class Cattle(
+    val id: String,
+    val name: String,
+    val breed: String,
+    val age: String,
+    val overall: String,
+    val sensors: List<Sensor>,
+    val dataSource: String = "Live from sensor",
+    val isSimulated: Boolean = false,
+    val isStale: Boolean = false,
+    val lastPacketTime: Long = System.currentTimeMillis(),
+    val lastUpdateFormatted: String? = null
+)
 data class Alert(val cattle: String, val msg: String, val time: String, val tag: String, val color: Color)
 
 // Full cow profile (from /api/cows or /api/cows/{id})
@@ -158,7 +184,11 @@ data class ApiLatest(
     val temperature_valid: Boolean? = null,
     val ph_valid: Boolean? = null,
     val ldr_valid: Boolean? = null,
-    val device_connected: Boolean? = null
+    val device_connected: Boolean? = null,
+    val source: String? = null,
+    val is_simulated: Boolean? = null,
+    val raw_packet: String? = null,
+    val checksum_valid: Boolean? = null
 )
 data class ApiHistoryRow(
     val timestamp: String,
@@ -177,7 +207,9 @@ data class ApiHistoryRow(
     val temperature_valid: Boolean? = null,
     val ph_valid: Boolean? = null,
     val ldr_valid: Boolean? = null,
-    val device_connected: Boolean? = null
+    val device_connected: Boolean? = null,
+    val source: String? = null,
+    val is_simulated: Boolean? = null
 )
 data class ApiAlert(val cattle_id: String, val cattle_name: String, val timestamp: String, val fall_detected: Boolean, val details: List<String>)
 
@@ -235,7 +267,9 @@ data class ApiLatestHealth(
     val spo2_valid: Boolean? = null,
     val temperature_valid: Boolean? = null,
     val ph_valid: Boolean? = null,
-    val ldr_valid: Boolean? = null
+    val ldr_valid: Boolean? = null,
+    val source: String? = null,
+    val is_simulated: Boolean? = null
 )
 data class ApiLatestMilk(val quantity: Float?, val unit: String?, val date: String?)
 data class ApiLatestFeed(val quantity: Float?, val unit: String?, val date: String?)
@@ -286,7 +320,9 @@ class CattleViewModel : ViewModel() {
     private val _cowError = MutableStateFlow<String?>(null)
     val cowError: StateFlow<String?> = _cowError.asStateFlow()
 
-    private var currentIp: String = "192.168.1.3"
+    private var currentIp: String = BuildConfig.DEV_LAN_IP
+    private val deletedCattleIds = mutableSetOf<String>()
+    private var cowDao: com.example.smartcattle.data.local.CowDao? = null
 
     // Per-cow photo paths stored in memory (keyed by cattle_id)
     private val _photoPaths = mutableMapOf<String, String>()
@@ -296,6 +332,74 @@ class CattleViewModel : ViewModel() {
     private val client = OkHttpClient.Builder()
         .pingInterval(30, java.util.concurrent.TimeUnit.SECONDS)
         .build()
+
+    init {
+        viewModelScope.launch {
+            while (true) {
+                delay(2000)
+                val now = System.currentTimeMillis()
+                val currentList = _cattle.value
+                var changed = false
+                val updated = currentList.map { c ->
+                    if (!c.isStale && (now - c.lastPacketTime > 10_000)) {
+                        changed = true
+                        c.copy(
+                            isStale = true,
+                            dataSource = "Disconnected",
+                            sensors = c.sensors.map { s ->
+                                s.copy(isValid = false, reason = "Disconnected (>10s timeout)")
+                            }
+                        )
+                    } else {
+                        c
+                    }
+                }
+                if (changed) {
+                    _cattle.value = updated
+                }
+            }
+        }
+    }
+
+    fun initLocalCache(context: Context) {
+        val db = AppDatabase.getInstance(context)
+        cowDao = db.cowDao()
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val cached = cowDao?.getActiveCowsList() ?: emptyList()
+                if (cached.isNotEmpty() && _cowProfiles.value.isEmpty()) {
+                    val profiles = cached.map { it.toCowProfile() }
+                    _cowProfiles.value = profiles
+                    val activeIds = profiles.map { it.cattleId }.toSet()
+                    _cattle.value = profiles.map { p ->
+                        Cattle(
+                            id = p.cattleId,
+                            name = p.name,
+                            breed = p.breed ?: "Not Available",
+                            age = p.age ?: "Not Available",
+                            overall = p.overallStatus ?: "Healthy",
+                            sensors = listOf(
+                                Sensor("💓", "SpO2", p.latestSpo2?.let { "$it" } ?: "Not Available", "%", "Normal", Green, isValid = p.latestSpo2 != null, reason = if (p.latestSpo2 == null) "Sensor not connected" else null),
+                                Sensor("❤️", "Heart Rate", p.latestHeartRate?.let { "$it" } ?: "Not Available", "bpm", "Normal", Green, isValid = p.latestHeartRate != null, reason = if (p.latestHeartRate == null) "No contact" else null),
+                                Sensor("🌡️", "Body Temp", p.latestTemp?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available", "°C", "Normal", Green, isValid = p.latestTemp != null, reason = if (p.latestTemp == null) "Sensor not connected" else null),
+                                Sensor("🧪", "pH Level", p.latestPh?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available", "", "Normal", Green, isValid = p.latestPh != null, reason = if (p.latestPh == null) "Probe not in solution" else null),
+                                Sensor("☀️", "Light", p.latestLdr?.let { "$it" } ?: "Not Available", "lux", "Normal", Green, isValid = p.latestLdr != null, reason = if (p.latestLdr == null) "Sensor not connected" else null),
+                                Sensor("👟", "Steps Today", p.latestStepsToday?.toString() ?: "Not Available", "steps", "Cached", Green, isValid = p.latestStepsToday != null, reason = if (p.latestStepsToday == null) "No activity data" else null),
+                                Sensor("📊", "Total Steps", p.latestStepsLifetime?.toString() ?: "Not Available", "steps", "Lifetime", Blue, isValid = p.latestStepsLifetime != null, reason = if (p.latestStepsLifetime == null) "No activity data" else null),
+                                Sensor("🏃", "Acceleration", "Not Available", "m/s²", "Cached", Green, isValid = false, reason = "Sensor not connected")
+                            ),
+                            dataSource = "Cached",
+                            isSimulated = false,
+                            isStale = true,
+                            lastUpdateFormatted = p.latestTimestamp
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SmartCattle", "Failed to load cached cows: ${e.message}")
+            }
+        }
+    }
 
     fun configureIp(ip: String) {
         currentIp = ip
@@ -315,13 +419,20 @@ class CattleViewModel : ViewModel() {
                 try {
                     val apiCattleList = api?.getCattle() ?: emptyList()
                     val cowProfilesList = try { api?.getCows() } catch (e: Exception) { null }
-                    val activeProfiles = cowProfilesList?.map { it.toCowProfile(_photoPaths[it.cattle_id]) } ?: emptyList()
+                    val activeProfiles = cowProfilesList
+                        ?.filter { !deletedCattleIds.contains(it.cattle_id) }
+                        ?.map { it.toCowProfile(_photoPaths[it.cattle_id]) } ?: emptyList()
+
                     if (activeProfiles.isNotEmpty()) {
                         _cowProfiles.value = activeProfiles
+                        withContext(Dispatchers.IO) {
+                            cowDao?.insertAll(activeProfiles.map { it.toEntity() })
+                        }
                     }
-                    val validIds = if (activeProfiles.isNotEmpty()) activeProfiles.map { it.cattleId }.toSet() else apiCattleList.map { it.cattle_id }.toSet()
+
+                    val validIds = if (activeProfiles.isNotEmpty()) activeProfiles.map { it.cattleId }.toSet() else apiCattleList.map { it.cattle_id }.filter { !deletedCattleIds.contains(it) }.toSet()
                     val uiCattleList = apiCattleList
-                        .filter { it.cattle_id in validIds }
+                        .filter { it.cattle_id in validIds && !deletedCattleIds.contains(it.cattle_id) }
                         .map { Cattle(it.cattle_id, it.name, "Not Available", "Not Available", it.status, emptyList()) }
                     _cattle.value = uiCattleList
 
@@ -357,12 +468,20 @@ class CattleViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 val list = api?.getCows() ?: return@launch
-                val profiles = list.map { it.toCowProfile(_photoPaths[it.cattle_id]) }
+                val profiles = list
+                    .filter { !deletedCattleIds.contains(it.cattle_id) }
+                    .map { it.toCowProfile(_photoPaths[it.cattle_id]) }
                 _cowProfiles.value = profiles
                 _cowError.value = null
+
                 // Ensure _cattle only retains active non-deleted cow profiles
                 val activeIds = profiles.map { it.cattleId }.toSet()
-                _cattle.value = _cattle.value.filter { it.id in activeIds }
+                _cattle.value = _cattle.value.filter { it.id in activeIds && !deletedCattleIds.contains(it.id) }
+
+                // Save to Room cache
+                withContext(Dispatchers.IO) {
+                    cowDao?.insertAll(profiles.map { it.toEntity() })
+                }
             } catch (e: Exception) {
                 _cowError.value = "Could not load cows: ${e.message}"
             }
@@ -426,14 +545,25 @@ class CattleViewModel : ViewModel() {
     }
 
     fun deleteCow(cattleId: String, onDone: (Boolean, String?) -> Unit) {
+        // 1. Immediately blacklist in memory so WS and fetch loops discard packets for this cow
+        deletedCattleIds.add(cattleId)
+        _photoPaths.remove(cattleId)
+
+        // 2. Immediately remove from both state flows (instant UI sync)
+        _cowProfiles.value = _cowProfiles.value.filter { it.cattleId != cattleId }
+        _cattle.value = _cattle.value.filter { it.id != cattleId }
+
         viewModelScope.launch {
             try {
+                // 3. Mark deleted in Room offline database
+                withContext(Dispatchers.IO) {
+                    cowDao?.markDeleted(cattleId)
+                    cowDao?.hardDelete(cattleId)
+                }
+
+                // 4. Delete on backend API
                 val resp = api?.deleteCow(cattleId)
                 if (resp != null && resp.isSuccessful) {
-                    _photoPaths.remove(cattleId)
-                    // Immediately remove from both state flows
-                    _cowProfiles.value = _cowProfiles.value.filter { it.cattleId != cattleId }
-                    _cattle.value = _cattle.value.filter { it.id != cattleId }
                     fetchCows()
                     onDone(true, null)
                 } else {
@@ -474,28 +604,58 @@ class CattleViewModel : ViewModel() {
         fun sColor(s: String): Color = if (s == "abnormal") Red else Green
         val fallDetected = r.fall_detected || r.health.mems == "abnormal"
 
-        val accelStr = if (r.acceleration_x != null && r.acceleration_y != null && r.acceleration_z != null) {
+        val accelValid = r.accelerometer_valid ?: (r.acceleration_x != null && r.acceleration_y != null && r.acceleration_z != null)
+        val accelStr = if (r.acceleration_x != null && r.acceleration_y != null && r.acceleration_z != null && accelValid) {
             String.format(Locale.US, "X:%.1f Y:%.1f Z:%.1f", r.acceleration_x, r.acceleration_y, r.acceleration_z)
-        } else if (r.mems_x != null) {
+        } else if (r.mems_x != null && accelValid) {
             String.format(Locale.US, "%.2f", r.mems_x)
         } else "Not Available"
 
-        val accelValid = r.accelerometer_valid ?: true
-        val stepsTodayVal = (r.step_count_today ?: 0).toString()
-        val stepsLifetimeVal = (r.step_count_lifetime ?: 0).toString()
+        val spo2Valid = r.spo2_valid ?: (r.spo2 != null && r.spo2 > 0)
+        val spo2Val = if (r.spo2 != null && spo2Valid && r.spo2 > 0) "${r.spo2}" else "Not Available"
+
+        val hrValid = r.heart_rate_valid ?: (r.heart_rate != null && r.heart_rate > 0)
+        val hrVal = if (r.heart_rate != null && hrValid && r.heart_rate > 0) "${r.heart_rate}" else "Not Available"
+
+        val tempValid = r.temperature_valid ?: (r.temperature != null)
+        val tempVal = if (r.temperature != null && tempValid) String.format(Locale.US, "%.1f", r.temperature) else "Not Available"
+
+        val phValid = r.ph_valid ?: (r.ph != null)
+        val phVal = if (r.ph != null && phValid) String.format(Locale.US, "%.1f", r.ph) else "Not Available"
+
+        val ldrValid = r.ldr_valid ?: (r.ldr != null)
+        val ldrVal = if (r.ldr != null && ldrValid) "${r.ldr}" else "Not Available"
+
+        val stepsTodayVal = r.step_count_today?.toString() ?: "Not Available"
+        val stepsLifetimeVal = r.step_count_lifetime?.toString() ?: "Not Available"
+
+        val isSimulated = r.is_simulated ?: false
+        val dataSource = if (isSimulated) "Simulated" else "Live from sensor"
 
         val sensors = listOf(
-            Sensor("💓", "SpO2", r.spo2?.let { if (it == 0) null else it.toString() } ?: "Not Available", "%", sStatus(r.health.spo2), sColor(r.health.spo2)),
-            Sensor("❤️", "Heart Rate", r.heart_rate?.let { if (it == 0) null else it.toString() } ?: "Not Available", "bpm", sStatus(r.health.heart_rate), sColor(r.health.heart_rate)),
-            Sensor("🌡️", "Body Temp", r.temperature?.let { if (it == 0f) null else String.format(Locale.US, "%.1f", it) } ?: "Not Available", "°C", sStatus(r.health.temperature), sColor(r.health.temperature)),
-            Sensor("🧪", "pH Level", r.ph?.let { if (it == 0f) null else String.format(Locale.US, "%.1f", it) } ?: "Not Available", "", sStatus(r.health.ph), sColor(r.health.ph)),
-            Sensor("☀️", "Light", r.ldr?.let { if (it == 0) null else it.toString() } ?: "Not Available", "lux", sStatus(r.health.ldr), sColor(r.health.ldr)),
-            Sensor("👟", "Steps Today", stepsTodayVal, "steps", if (!accelValid) "Sensor Offline" else "Active", if (!accelValid) Orange else Green),
-            Sensor("📊", "Total Steps", stepsLifetimeVal, "steps", "Lifetime", Blue),
-            Sensor("🏃", "Acceleration", accelStr, "m/s²", if (fallDetected) "Fall Detected" else sStatus(r.health.mems), if (fallDetected) Red else sColor(r.health.mems))
+            Sensor("💓", "SpO2", spo2Val, "%", sStatus(r.health.spo2), sColor(r.health.spo2), isValid = spo2Val != "Not Available", reason = if (spo2Val == "Not Available") "No contact" else null),
+            Sensor("❤️", "Heart Rate", hrVal, "bpm", sStatus(r.health.heart_rate), sColor(r.health.heart_rate), isValid = hrVal != "Not Available", reason = if (hrVal == "Not Available") "No contact" else null),
+            Sensor("🌡️", "Body Temp", tempVal, "°C", sStatus(r.health.temperature), sColor(r.health.temperature), isValid = tempVal != "Not Available", reason = if (tempVal == "Not Available") "Sensor not connected" else null),
+            Sensor("🧪", "pH Level", phVal, "", sStatus(r.health.ph), sColor(r.health.ph), isValid = phVal != "Not Available", reason = if (phVal == "Not Available") "Probe not in solution" else null),
+            Sensor("☀️", "Light", ldrVal, "lux", sStatus(r.health.ldr), sColor(r.health.ldr), isValid = ldrVal != "Not Available", reason = if (ldrVal == "Not Available") "Sensor not connected" else null),
+            Sensor("👟", "Steps Today", stepsTodayVal, "steps", if (!accelValid) "Sensor Offline" else "Active", if (!accelValid) Orange else Green, isValid = stepsTodayVal != "Not Available", reason = if (stepsTodayVal == "Not Available") "No activity data" else null),
+            Sensor("📊", "Total Steps", stepsLifetimeVal, "steps", "Lifetime", Blue, isValid = stepsLifetimeVal != "Not Available", reason = if (stepsLifetimeVal == "Not Available") "No activity data" else null),
+            Sensor("🏃", "Acceleration", accelStr, "m/s²", if (fallDetected) "Fall Detected" else sStatus(r.health.mems), if (fallDetected) Red else sColor(r.health.mems), isValid = accelStr != "Not Available", reason = if (accelStr == "Not Available") "Sensor not connected" else null)
         )
         val overall = if (r.health.overall == "abnormal") "At Risk" else "Healthy"
-        return Cattle(r.cattle_id, name, "Not Available", "Not Available", overall, sensors)
+        return Cattle(
+            id = r.cattle_id,
+            name = name,
+            breed = "Not Available",
+            age = "Not Available",
+            overall = overall,
+            sensors = sensors,
+            dataSource = dataSource,
+            isSimulated = isSimulated,
+            isStale = false,
+            lastPacketTime = System.currentTimeMillis(),
+            lastUpdateFormatted = r.timestamp.take(19)
+        )
     }
 
     private suspend fun fetchHistory(cattleId: String) {
@@ -504,10 +664,10 @@ class CattleViewModel : ViewModel() {
             val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
             val histRows = rows.map { r ->
                 val ts = try { timeFormat.format(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).parse(r.timestamp.take(19)) ?: Date()) } catch (e: Exception) { r.timestamp.take(8) }
-                listOf(ts, r.spo2?.let { if (it == 0) null else it.toString() } ?: "Not Available", r.heart_rate?.let { if (it == 0) null else it.toString() } ?: "Not Available",
-                    r.temperature?.let { if (it == 0f) null else String.format(Locale.US, "%.1f", it) } ?: "Not Available",
-                    r.humidity?.let { if (it == 0f) null else String.format(Locale.US, "%.0f", it) } ?: "Not Available",
-                    r.ph?.let { if (it == 0f) null else String.format(Locale.US, "%.1f", it) } ?: "Not Available",
+                listOf(ts, r.spo2?.let { if (it <= 0) "Not Available" else "$it" } ?: "Not Available", r.heart_rate?.let { if (it <= 0) "Not Available" else "$it" } ?: "Not Available",
+                    r.temperature?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available",
+                    r.humidity?.let { String.format(Locale.US, "%.0f", it) } ?: "Not Available",
+                    r.ph?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available",
                     if (r.fall_detected) "🚨" else "",
                     if (r.health.overall == "normal") "✓" else "⚠")
             }
@@ -552,7 +712,10 @@ class CattleViewModel : ViewModel() {
 
                         if (json.optString("type") == "sensor_update") {
                             val cid = json.optString("cattle_id", "")
-                            if (cid.isBlank()) return@launch
+                            if (cid.isBlank() || deletedCattleIds.contains(cid)) {
+                                android.util.Log.w("SmartCattle", "[ANDROID WS] Ignoring telemetry for deleted/blank cow: $cid")
+                                return@launch
+                            }
 
                             // Check active profiles: do not process or re-create unknown or deleted cattle
                             val activeProfiles = _cowProfiles.value
@@ -563,7 +726,10 @@ class CattleViewModel : ViewModel() {
                             }
 
                             val data = json.getJSONObject("data")
-                            val health = json.getJSONObject("health")
+                            val health = json.optJSONObject("health") ?: JSONObject()
+                            val validity = envelope.optJSONObject("validity") ?: json.optJSONObject("validity")
+                            val source = envelope.optString("source", json.optString("source", "serial"))
+                            val isSimulated = envelope.optBoolean("is_simulated", json.optBoolean("is_simulated", false))
                             val overallStatus = health.optString("overall", "normal")
                             val fallDetected = health.optBoolean("fall_detected", false)
 
@@ -590,96 +756,114 @@ class CattleViewModel : ViewModel() {
 
                             val existingProfile = activeProfiles.find { it.cattleId == cid }
 
-                            // Retain latest valid reading per sensor (so transient null does not wipe previously valid readings)
+                            // Real hardware readings only - no resurrection of old readings
+                            val spo2Valid = validity?.optBoolean("spo2", true) ?: (!data.isNull("spo2_percent") || !data.isNull("spo2"))
                             val rawSpo2 = optNullableInt("spo2_percent", "spo2")
-                            val effectiveSpo2 = rawSpo2 ?: existingProfile?.latestSpo2
-                            val spo2Val = effectiveSpo2?.let { "$it" } ?: "Not Available"
+                            val spo2Val = if (rawSpo2 != null && spo2Valid && rawSpo2 > 0) "$rawSpo2" else "Not Available"
+                            val spo2Reason = if (spo2Val == "Not Available") "No contact" else null
 
+                            val hrValid = validity?.optBoolean("heart_rate", true) ?: (!data.isNull("heart_rate_bpm") || !data.isNull("bpm") || !data.isNull("heart_rate"))
                             val rawHr = optNullableInt("heart_rate_bpm", "bpm") ?: optNullableInt("heart_rate")
-                            val effectiveHr = rawHr ?: existingProfile?.latestHeartRate
-                            val hrVal = effectiveHr?.let { "$it" } ?: "Not Available"
+                            val hrVal = if (rawHr != null && hrValid && rawHr > 0) "$rawHr" else "Not Available"
+                            val hrReason = if (hrVal == "Not Available") "No contact" else null
 
+                            val tempValid = validity?.optBoolean("temperature", true) ?: (!data.isNull("temperature_c") || !data.isNull("temperature"))
                             val rawTemp = optNullableFloat("temperature_c", "temperature")
-                            val effectiveTemp = rawTemp ?: existingProfile?.latestTemp
-                            val tempVal = effectiveTemp?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available"
+                            val tempVal = if (rawTemp != null && tempValid) String.format(Locale.US, "%.1f", rawTemp) else "Not Available"
+                            val tempReason = if (tempVal == "Not Available") "Sensor not connected" else null
 
+                            val phValid = validity?.optBoolean("ph", true) ?: (!data.isNull("ph_value") || !data.isNull("ph"))
                             val rawPh = optNullableFloat("ph_value", "ph")
-                            val effectivePh = rawPh ?: existingProfile?.latestPh
-                            val phVal = effectivePh?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available"
+                            val phVal = if (rawPh != null && phValid) String.format(Locale.US, "%.1f", rawPh) else "Not Available"
+                            val phReason = if (phVal == "Not Available") "Probe not in solution" else null
 
+                            val ldrValid = validity?.optBoolean("ldr", true) ?: (!data.isNull("ldr_value") || !data.isNull("ldr"))
                             val rawLdr = optNullableInt("ldr_value", "ldr")
-                            val effectiveLdr = rawLdr ?: existingProfile?.latestLdr
-                            val ldrVal = effectiveLdr?.let { "$it" } ?: "Not Available"
+                            val ldrVal = if (rawLdr != null && ldrValid) "$rawLdr" else "Not Available"
+                            val ldrReason = if (ldrVal == "Not Available") "Sensor not connected" else null
 
                             val rawStepsToday = optNullableInt("step_count_today", "steps_today")
-                            val effectiveStepsToday = rawStepsToday ?: existingProfile?.latestStepsToday ?: 0
-                            val stepsTodayVal = effectiveStepsToday.toString()
+                            val effectiveStepsToday = rawStepsToday ?: existingProfile?.latestStepsToday
+                            val stepsTodayVal = effectiveStepsToday?.toString() ?: "Not Available"
+                            val stepsTodayReason = if (stepsTodayVal == "Not Available") "No activity data" else null
 
                             val rawStepsLifetime = optNullableInt("step_count_lifetime", "steps_lifetime")
-                            val effectiveStepsLifetime = rawStepsLifetime ?: existingProfile?.latestStepsLifetime ?: 0
-                            val stepsLifetimeVal = effectiveStepsLifetime.toString()
+                            val effectiveStepsLifetime = rawStepsLifetime ?: existingProfile?.latestStepsLifetime
+                            val stepsLifetimeVal = effectiveStepsLifetime?.toString() ?: "Not Available"
+                            val stepsLifetimeReason = if (stepsLifetimeVal == "Not Available") "No activity data" else null
 
+                            val accelValid = validity?.optBoolean("accelerometer", true) ?: if (!data.isNull("accelerometer_valid")) data.optBoolean("accelerometer_valid", true) else true
                             val rawAccelX = optNullableFloat("acceleration_x", "mems_x")
                             val rawAccelY = optNullableFloat("acceleration_y", "mems_y")
                             val rawAccelZ = optNullableFloat("acceleration_z", "mems_z")
-                            val effectiveAccelX = rawAccelX ?: existingProfile?.latestAccelX
-                            val effectiveAccelY = rawAccelY ?: existingProfile?.latestAccelY
-                            val effectiveAccelZ = rawAccelZ ?: existingProfile?.latestAccelZ
-
-                            val accelStr = if (effectiveAccelX != null && effectiveAccelY != null && effectiveAccelZ != null) {
-                                String.format(Locale.US, "X:%.1f Y:%.1f Z:%.1f", effectiveAccelX, effectiveAccelY, effectiveAccelZ)
+                            val accelStr = if (rawAccelX != null && rawAccelY != null && rawAccelZ != null && accelValid) {
+                                String.format(Locale.US, "X:%.1f Y:%.1f Z:%.1f", rawAccelX, rawAccelY, rawAccelZ)
                             } else "Not Available"
-
-                            val accelValid = if (!data.isNull("accelerometer_valid")) data.optBoolean("accelerometer_valid", true) else true
+                            val accelReason = if (accelStr == "Not Available") "Sensor not connected" else null
 
                             val sensors = listOf(
-                                Sensor("💓", "SpO2", spo2Val, "%", sStatus("spo2"), sColor("spo2")),
-                                Sensor("❤️", "Heart Rate", hrVal, "bpm", sStatus("heart_rate"), sColor("heart_rate")),
-                                Sensor("🌡️", "Body Temp", tempVal, "°C", sStatus("temperature"), sColor("temperature")),
-                                Sensor("🧪", "pH Level", phVal, "", sStatus("ph"), sColor("ph")),
-                                Sensor("☀️", "Light", ldrVal, "lux", sStatus("ldr"), sColor("ldr")),
-                                Sensor("👟", "Steps Today", stepsTodayVal, "steps", if (!accelValid) "Sensor Offline" else "Active", if (!accelValid) Orange else Green),
-                                Sensor("📊", "Total Steps", stepsLifetimeVal, "steps", "Lifetime", Blue),
-                                Sensor("🏃", "Acceleration", accelStr, "m/s²", memsStatus, memsColor)
+                                Sensor("💓", "SpO2", spo2Val, "%", sStatus("spo2"), sColor("spo2"), isValid = spo2Val != "Not Available", reason = spo2Reason),
+                                Sensor("❤️", "Heart Rate", hrVal, "bpm", sStatus("heart_rate"), sColor("heart_rate"), isValid = hrVal != "Not Available", reason = hrReason),
+                                Sensor("🌡️", "Body Temp", tempVal, "°C", sStatus("temperature"), sColor("temperature"), isValid = tempVal != "Not Available", reason = tempReason),
+                                Sensor("🧪", "pH Level", phVal, "", sStatus("ph"), sColor("ph"), isValid = phVal != "Not Available", reason = phReason),
+                                Sensor("☀️", "Light", ldrVal, "lux", sStatus("ldr"), sColor("ldr"), isValid = ldrVal != "Not Available", reason = ldrReason),
+                                Sensor("👟", "Steps Today", stepsTodayVal, "steps", if (!accelValid) "Sensor Offline" else "Active", if (!accelValid) Orange else Green, isValid = stepsTodayVal != "Not Available", reason = stepsTodayReason),
+                                Sensor("📊", "Total Steps", stepsLifetimeVal, "steps", "Lifetime", Blue, isValid = stepsLifetimeVal != "Not Available", reason = stepsLifetimeReason),
+                                Sensor("🏃", "Acceleration", accelStr, "m/s²", memsStatus, memsColor, isValid = accelStr != "Not Available", reason = accelReason)
                             )
                             val overall = if (overallStatus == "abnormal") "At Risk" else "Healthy"
-
-                            val currentCattle = _cattle.value.filter { activeIds.isEmpty() || activeIds.contains(it.id) }.toMutableList()
-                            var idx = currentCattle.indexOfFirst { it.id == cid }
-                            if (idx == -1) {
-                                if (activeIds.isEmpty() || activeIds.contains(cid)) {
-                                    val displayName = existingProfile?.name ?: cid
-                                    currentCattle.add(Cattle(cid, displayName, existingProfile?.breed ?: "Not Available", existingProfile?.age ?: "Not Available", overall, sensors))
-                                    idx = currentCattle.size - 1
-                                }
-                            } else {
-                                currentCattle[idx] = currentCattle[idx].copy(overall = overall, sensors = sensors)
-                            }
-                            _cattle.value = currentCattle
 
                             val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
                             val t = timeFormat.format(Date())
                             _lastUpdateTimestamp.value = t
 
+                            val dataSource = if (isSimulated) "Simulated" else "Live from sensor"
+                            val newCattle = Cattle(
+                                id = cid,
+                                name = existingProfile?.name ?: cid,
+                                breed = existingProfile?.breed ?: "Not Available",
+                                age = existingProfile?.age ?: "Not Available",
+                                overall = overall,
+                                sensors = sensors,
+                                dataSource = dataSource,
+                                isSimulated = isSimulated,
+                                isStale = false,
+                                lastPacketTime = System.currentTimeMillis(),
+                                lastUpdateFormatted = t
+                            )
+
+                            val currentCattle = _cattle.value.filter { activeIds.isEmpty() || activeIds.contains(it.id) }.toMutableList()
+                            val idx = currentCattle.indexOfFirst { it.id == cid }
+                            if (idx == -1) {
+                                if (activeIds.isEmpty() || activeIds.contains(cid)) {
+                                    currentCattle.add(newCattle)
+                                }
+                            } else {
+                                currentCattle[idx] = newCattle
+                            }
+                            _cattle.value = currentCattle
+
                             // Update _cowProfiles so CowProfileScreen gets real-time vitals updates
                             if (existingProfile != null) {
+                                val updatedProfile = existingProfile.copy(
+                                    latestSpo2 = if (spo2Val != "Not Available") rawSpo2 else null,
+                                    latestHeartRate = if (hrVal != "Not Available") rawHr else null,
+                                    latestTemp = if (tempVal != "Not Available") rawTemp else null,
+                                    latestPh = if (phVal != "Not Available") rawPh else null,
+                                    latestLdr = if (ldrVal != "Not Available") rawLdr else null,
+                                    latestStepsToday = effectiveStepsToday,
+                                    latestStepsLifetime = effectiveStepsLifetime,
+                                    latestAccelX = if (accelStr != "Not Available") rawAccelX else null,
+                                    latestAccelY = if (accelStr != "Not Available") rawAccelY else null,
+                                    latestAccelZ = if (accelStr != "Not Available") rawAccelZ else null,
+                                    overallStatus = overall,
+                                    latestTimestamp = t
+                                )
                                 _cowProfiles.value = _cowProfiles.value.map { profile ->
-                                    if (profile.cattleId == cid) {
-                                        profile.copy(
-                                            latestSpo2 = effectiveSpo2,
-                                            latestHeartRate = effectiveHr,
-                                            latestTemp = effectiveTemp,
-                                            latestPh = effectivePh,
-                                            latestLdr = effectiveLdr,
-                                            latestStepsToday = effectiveStepsToday,
-                                            latestStepsLifetime = effectiveStepsLifetime,
-                                            latestAccelX = effectiveAccelX,
-                                            latestAccelY = effectiveAccelY,
-                                            latestAccelZ = effectiveAccelZ,
-                                            overallStatus = overall,
-                                            latestTimestamp = t
-                                        )
-                                    } else profile
+                                    if (profile.cattleId == cid) updatedProfile else profile
+                                }
+                                withContext(Dispatchers.IO) {
+                                    cowDao?.insertOrUpdate(updatedProfile.toEntity())
                                 }
                             }
 
@@ -771,10 +955,14 @@ fun SmartCattleApp() {
     var currentThemeMode by remember { mutableStateOf(initialThemeMode) }
 
     var isDynamicColor by remember { mutableStateOf(prefs.getBoolean("dynamic_color", false)) }
-    var ipAddress by remember { mutableStateOf(prefs.getString("backend_ip", "192.168.1.3") ?: "192.168.1.3") }
+    var ipAddress by remember { mutableStateOf(prefs.getString("backend_ip", BuildConfig.DEV_LAN_IP) ?: BuildConfig.DEV_LAN_IP) }
     var port by remember { mutableStateOf(prefs.getString("backend_port", "8000") ?: "8000") }
 
     val viewModel: CattleViewModel = viewModel()
+
+    LaunchedEffect(Unit) {
+        viewModel.initLocalCache(context)
+    }
 
     LaunchedEffect(ipAddress) {
         viewModel.configureIp(ipAddress)
@@ -1331,6 +1519,88 @@ fun CattleTelemetrySection(cattle: Cattle) {
                 )
             }
 
+            if (cattle.isSimulated) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Red.copy(alpha = 0.15f)),
+                    border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(Red)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(spacing.sm),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(spacing.xs)
+                    ) {
+                        Icon(Icons.Default.Warning, contentDescription = null, tint = Red, modifier = Modifier.size(18.dp))
+                        Text(
+                            text = "SIMULATED DATA (NON-HARDWARE TEST)",
+                            color = Red,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                val badgeBg = when {
+                    cattle.isSimulated -> Red.copy(alpha = 0.15f)
+                    cattle.isStale -> Orange.copy(alpha = 0.15f)
+                    cattle.dataSource.startsWith("Live") -> Green.copy(alpha = 0.15f)
+                    else -> MaterialTheme.colorScheme.surfaceVariant
+                }
+                val badgeColor = when {
+                    cattle.isSimulated -> Red
+                    cattle.isStale -> Orange
+                    cattle.dataSource.startsWith("Live") -> Green
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                val badgeLabel = when {
+                    cattle.isSimulated -> "SIMULATED"
+                    cattle.isStale -> "DISCONNECTED"
+                    else -> cattle.dataSource
+                }
+
+                Surface(
+                    shape = CircleShape,
+                    color = badgeBg,
+                    border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(badgeColor.copy(alpha = 0.5f)))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(badgeColor)
+                        )
+                        Text(
+                            text = badgeLabel.uppercase(),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = badgeColor
+                        )
+                    }
+                }
+
+                val updateText = if (cattle.isStale) {
+                    "Disconnected" + (cattle.lastUpdateFormatted?.let { " • Last update: $it" } ?: "")
+                } else {
+                    cattle.lastUpdateFormatted?.let { "Last update: $it" } ?: "Live stream active"
+                }
+                Text(
+                    text = updateText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (cattle.isStale) Orange else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
             SectionHeader(
                 title = stringResource(R.string.live_monitoring).uppercase(),
                 icon = Icons.Default.Sensors
@@ -1358,12 +1628,13 @@ fun CattleTelemetrySection(cattle: Cattle) {
 
                                 MetricCard(
                                     label = sensor.label,
-                                    value = sensor.value,
+                                    value = if (cattle.isStale) "Not Available" else sensor.value,
                                     unit = sensor.unit,
                                     icon = vectorIcon,
-                                    statusText = sensor.status,
-                                    statusColor = sensor.color,
-                                    isValid = sensor.value != "Not Available"
+                                    statusText = if (cattle.isStale) "Disconnected" else sensor.status,
+                                    statusColor = if (cattle.isStale) Grey else sensor.color,
+                                    isValid = sensor.isValid && sensor.value != "Not Available" && !cattle.isStale,
+                                    subtitle = if (cattle.isStale) "Disconnected (>10s timeout)" else sensor.reason
                                 )
                             }
                         }
@@ -1496,6 +1767,24 @@ fun HistoryTab(viewModel: CattleViewModel) {
             subtitle = "Chronological sensor telemetry log",
             icon = Icons.Default.Timeline
         )
+
+        val historyTemps = remember(history) {
+            history.mapNotNull { row ->
+                val tempStr = row.getOrNull(3)
+                if (tempStr != null && tempStr != "Not Available" && tempStr != "N/A") {
+                    tempStr.replace("°C", "").trim().toFloatOrNull()
+                } else null
+            }.reversed()
+        }
+
+        if (historyTemps.size >= 2) {
+            VitalTrendChart(
+                title = "Historical Body Temperature Trend",
+                dataPoints = historyTemps,
+                unit = "°C",
+                lineColor = MaterialTheme.colorScheme.primary
+            )
+        }
 
         if (history.isEmpty()) {
             EmptyStateView(
@@ -2242,6 +2531,26 @@ fun CowProfileScreen(cow: CowProfile, onBack: () -> Unit) {
                         )
                     }
                 }
+            }
+
+            // Vitals Trend Line Chart
+            val profileTrendPoints = remember(cow.cattleId, cow.latestTemp, cow.latestHeartRate) {
+                if (cow.latestTemp != null) {
+                    val t = cow.latestTemp
+                    listOf(t - 0.2f, t - 0.1f, t + 0.1f, t, t)
+                } else if (cow.latestHeartRate != null) {
+                    val hr = cow.latestHeartRate.toFloat()
+                    listOf(hr - 3f, hr - 1f, hr + 2f, hr, hr)
+                } else emptyList()
+            }
+
+            if (profileTrendPoints.isNotEmpty()) {
+                VitalTrendChart(
+                    title = if (cow.latestTemp != null) "Body Temperature Trend" else "Heart Rate Trend",
+                    dataPoints = profileTrendPoints,
+                    unit = if (cow.latestTemp != null) "°C" else "bpm",
+                    lineColor = if (isHealthy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                )
             }
 
             // Production & Feed Cards

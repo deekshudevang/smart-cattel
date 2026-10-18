@@ -192,3 +192,178 @@ def test_cows_endpoint_returns_complete_vitals_dto():
 
     finally:
         db.close()
+
+
+def test_canonical_telemetry_fields_and_deprecated_alias_mapping():
+    """Verify that TelemetryPacket maps legacy aliases to canonical fields and supports deprecated properties."""
+    legacy_payload = {
+        "device_id": "TEST-CANONICAL-01",
+        "timestamp": int(time.time()),
+        "bpm": 74.0,
+        "bpm_valid": True,
+        "spo2_percent": 98.0,
+        "temperature_c": 38.7,
+        "ph_value": 6.85,
+        "ldr_value": 0.0, # Test 0 lux preservation
+        "mems_x": 0.15,
+        "mems_y": -0.08,
+        "mems_z": 9.81,
+        "mems_valid": True,
+        "steps_today": 320,
+        "lifetime_steps": 5400
+    }
+
+    packet = TelemetryPacket(**legacy_payload)
+
+    # 1. Verify canonical model fields are populated
+    assert packet.heart_rate == 74.0
+    assert packet.heart_rate_valid is True
+    assert packet.spo2 == 98.0
+    assert packet.spo2_valid is True
+    assert packet.temperature == 38.7
+    assert packet.temperature_valid is True
+    assert packet.ph == 6.85
+    assert packet.ph_valid is True
+    assert packet.ldr == 0.0
+    assert packet.ldr_valid is True
+    assert packet.acceleration_x == 0.15
+    assert packet.acceleration_y == -0.08
+    assert packet.acceleration_z == 9.81
+    assert packet.accelerometer_valid is True
+    assert packet.step_count_today == 320
+    assert packet.step_count_lifetime == 5400
+
+    # 2. Verify deprecated backward-compatible properties work
+    assert packet.bpm == 74.0
+    assert packet.heart_rate_bpm == 74.0
+    assert packet.bpm_valid is True
+    assert packet.spo2_percent == 98.0
+    assert packet.temperature_c == 38.7
+    assert packet.ph_value == 6.85
+    assert packet.ldr_value == 0.0
+    assert packet.mems_x == 0.15
+    assert packet.mems_y == -0.08
+    assert packet.mems_z == 9.81
+    assert packet.mems_valid is True
+    assert packet.steps_today == 320
+    assert packet.lifetime_steps == 5400
+
+
+def test_zero_ldr_preserved_in_db_and_endpoints():
+    """Verify that a reading with 0 lux (complete darkness) is saved as 0, not coerced to None."""
+    db: Session = SessionLocal()
+    test_id = "TEST-COW-DARK-01"
+    try:
+        cow = db.query(models.Cattle).filter(models.Cattle.cattle_id == test_id).first()
+        if not cow:
+            cow = models.Cattle(cattle_id=test_id, name="Midnight Cow", status="normal", deleted=False)
+            db.add(cow)
+        else:
+            cow.deleted = False
+        db.commit()
+
+        # Save reading with 0 lux
+        reading = models.SensorReading(
+            cattle_id=test_id,
+            device_id="DEV-DARK-01",
+            timestamp=datetime.utcnow(),
+            heart_rate=70.0,
+            spo2=99.0,
+            temperature=38.3,
+            ph=6.9,
+            ldr=0.0, # 0 lux
+            ldr_valid=True,
+            step_count_today=10,
+            step_count_lifetime=100,
+            accelerometer_valid=True,
+            device_connected=True
+        )
+        db.add(reading)
+        db.commit()
+
+        r = client.get(f"/api/cows/{test_id}")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["latest_health"]["ldr"] == 0.0
+    finally:
+        db.query(models.SensorReading).filter(models.SensorReading.cattle_id == test_id).delete()
+        db.query(models.Cattle).filter(models.Cattle.cattle_id == test_id).delete()
+        db.commit()
+        db.close()
+
+
+def test_simulation_blocked_in_production_by_default():
+    """Verify that POST /api/sensor/data returns 403 Forbidden unless ALLOW_SIMULATION is explicitly enabled."""
+    sim_payload = {
+        "device_id": "SIM-DEV-001",
+        "cattle_id": "TEST-COW-SIM",
+        "heart_rate": 75.0,
+        "spo2": 98.0,
+        "temperature": 38.5,
+        "ph": 6.8,
+        "ldr": 950
+    }
+    r = client.post("/api/sensor/data", json=sim_payload)
+    assert r.status_code == 403
+    assert "Simulation and HTTP sensor ingestion disabled" in r.json()["detail"]
+
+
+def test_queries_exclude_simulated_readings_by_default():
+    """Verify that endpoints exclude is_simulated=True rows by default and only return real rows."""
+    db: Session = SessionLocal()
+    test_id = "TEST-COW-FILTER-SIM"
+    try:
+        cow = db.query(models.Cattle).filter(models.Cattle.cattle_id == test_id).first()
+        if not cow:
+            cow = models.Cattle(cattle_id=test_id, name="Filter Test Cow", status="normal", deleted=False)
+            db.add(cow)
+        else:
+            cow.deleted = False
+        db.commit()
+
+        # Insert a real reading
+        real_reading = models.SensorReading(
+            cattle_id=test_id,
+            device_id="DEV-REAL",
+            timestamp=datetime(2026, 10, 18, 12, 0, 0),
+            ldr=800,
+            ldr_valid=True,
+            source="serial",
+            is_simulated=False,
+            device_connected=True
+        )
+        db.add(real_reading)
+
+        # Insert a simulated reading with later timestamp
+        sim_reading = models.SensorReading(
+            cattle_id=test_id,
+            device_id="DEV-SIM",
+            timestamp=datetime(2026, 10, 18, 13, 0, 0),
+            ldr=999,
+            ldr_valid=True,
+            source="simulator",
+            is_simulated=True,
+            device_connected=True
+        )
+        db.add(sim_reading)
+        db.commit()
+
+        # By default, latest reading must return the real reading (ldr=800), ignoring the simulated one (ldr=999)
+        r_latest = client.get(f"/api/cattle/{test_id}/latest")
+        assert r_latest.status_code == 200
+        latest_data = r_latest.json()
+        assert latest_data["ldr"] == 800
+        assert latest_data["is_simulated"] is False
+
+        # When include_simulated=True is explicitly passed, the later simulated reading is accessible
+        r_sim = client.get(f"/api/cattle/{test_id}/latest?include_simulated=true")
+        assert r_sim.status_code == 200
+        assert r_sim.json()["ldr"] == 999
+        assert r_sim.json()["is_simulated"] is True
+    finally:
+        db.query(models.SensorReading).filter(models.SensorReading.cattle_id == test_id).delete()
+        db.query(models.Cattle).filter(models.Cattle.cattle_id == test_id).delete()
+        db.commit()
+        db.close()
+
+

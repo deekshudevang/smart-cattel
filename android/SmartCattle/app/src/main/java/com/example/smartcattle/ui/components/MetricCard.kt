@@ -149,7 +149,8 @@ fun MetricCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    if (currentUnit.isNotBlank()) {
+                    val showUnit = isValid && currentValue != "Not Available" && currentUnit.isNotBlank()
+                    if (showUnit) {
                         Text(
                             text = currentUnit,
                             style = MaterialTheme.typography.labelMedium,
@@ -163,12 +164,13 @@ fun MetricCard(
                 }
             }
 
-            // Subtitle / Secondary label (e.g., target or additional sensor info)
-            if (!subtitle.isNullOrBlank()) {
+            // Subtitle / Reason label (e.g., "No contact", "Sensor not connected", or target info)
+            val displaySubtitle = subtitle ?: if (!isValid || value == "Not Available") "Not Available" else null
+            if (!displaySubtitle.isNullOrBlank()) {
                 Text(
-                    text = subtitle,
+                    text = displaySubtitle,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (!isValid || value == "Not Available") MaterialTheme.colorScheme.error.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )

@@ -166,7 +166,13 @@ async def startup_event():
 
     loop = asyncio.get_running_loop()
     def on_serial_data(data):
-        asyncio.run_coroutine_threadsafe(sensor_service.process_reading(data, manager), loop)
+        future = asyncio.run_coroutine_threadsafe(sensor_service.process_reading(data, manager), loop)
+        def handle_future(f):
+            try:
+                f.result()
+            except Exception as e:
+                logger.error(f"[SERIAL COROUTINE ERROR] Failed in process_reading: {e}", exc_info=True)
+        future.add_done_callback(handle_future)
         
     serial_manager.start(callback=on_serial_data)
 
@@ -235,7 +241,14 @@ def arduino_reconnect():
 
 @app.post("/api/sensor/data")
 async def receive_sensor_data(request: Request):
+    if not settings.ALLOW_SIMULATION:
+        raise HTTPException(
+            status_code=403,
+            detail="Simulation and HTTP sensor ingestion disabled. Real hardware readings only via serial."
+        )
     data = await request.json()
+    data["source"] = "simulator"
+    data["is_simulated"] = True
     result = await sensor_service.process_reading(data, manager)
     return result
 
@@ -248,14 +261,17 @@ def get_cattle(db: Session = Depends(get_db)):
     return [{"cattle_id": c.cattle_id, "name": c.name, "status": c.status} for c in cattle_list]
 
 @app.get("/api/cows")
-def get_cows(db: Session = Depends(get_db)):
+def get_cows(include_simulated: bool = False, db: Session = Depends(get_db)):
     from sqlalchemy import or_
     cattle_list = db.query(models.Cattle).filter(
         or_(models.Cattle.deleted == False, models.Cattle.deleted == None)
     ).all()
     results = []
     for c in cattle_list:
-        reading = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == c.cattle_id).order_by(models.SensorReading.timestamp.desc()).first()
+        reading_q = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == c.cattle_id)
+        if not include_simulated:
+            reading_q = reading_q.filter(models.SensorReading.is_simulated == False)
+        reading = reading_q.order_by(models.SensorReading.timestamp.desc()).first()
         prediction = None
         if reading:
             prediction = db.query(models.Prediction).filter(models.Prediction.reading_id == reading.id).first()
@@ -299,6 +315,8 @@ def get_cows(db: Session = Depends(get_db)):
                 "temperature_valid": reading.temperature_valid if reading else False,
                 "ph_valid": reading.ph_valid if reading else False,
                 "ldr_valid": reading.ldr_valid if reading else False,
+                "source": reading.source if reading else None,
+                "is_simulated": reading.is_simulated if reading else False,
                 "overall_status": prediction.overall_status if prediction else None
             },
             "latest_milk": {
@@ -320,7 +338,7 @@ def get_cows(db: Session = Depends(get_db)):
     return results
 
 @app.get("/api/cows/{cattle_id}")
-def get_cow(cattle_id: str, db: Session = Depends(get_db)):
+def get_cow(cattle_id: str, include_simulated: bool = False, db: Session = Depends(get_db)):
     from sqlalchemy import or_
     c = db.query(models.Cattle).filter(
         models.Cattle.cattle_id == cattle_id,
@@ -328,7 +346,10 @@ def get_cow(cattle_id: str, db: Session = Depends(get_db)):
     ).first()
     if not c:
         raise HTTPException(status_code=404, detail="Cow not found")
-    reading = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == c.cattle_id).order_by(models.SensorReading.timestamp.desc()).first()
+    reading_q = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == c.cattle_id)
+    if not include_simulated:
+        reading_q = reading_q.filter(models.SensorReading.is_simulated == False)
+    reading = reading_q.order_by(models.SensorReading.timestamp.desc()).first()
     prediction = None
     if reading:
         prediction = db.query(models.Prediction).filter(models.Prediction.reading_id == reading.id).first()
@@ -372,6 +393,8 @@ def get_cow(cattle_id: str, db: Session = Depends(get_db)):
             "temperature_valid": reading.temperature_valid if reading else False,
             "ph_valid": reading.ph_valid if reading else False,
             "ldr_valid": reading.ldr_valid if reading else False,
+            "source": reading.source if reading else None,
+            "is_simulated": reading.is_simulated if reading else False,
             "overall_status": prediction.overall_status if prediction else None
         },
         "latest_milk": {
@@ -496,73 +519,12 @@ def delete_cow(cattle_id: str, db: Session = Depends(get_db)):
     logger.info(f"[DELETE COW] Soft-deleted cow and unassigned devices for: {cattle_id}")
     return None
 
-@app.get("/api/cows/{cattle_id}")
-def get_cow_by_id(cattle_id: str, db: Session = Depends(get_db)):
-    from sqlalchemy import or_
-    c = db.query(models.Cattle).filter(
-        models.Cattle.cattle_id == cattle_id,
-        or_(models.Cattle.deleted == False, models.Cattle.deleted == None)
-    ).first()
-    if not c:
-        raise HTTPException(status_code=404, detail="Cow not found")
-    reading = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == c.cattle_id).order_by(models.SensorReading.timestamp.desc()).first()
-    prediction = None
-    if reading:
-        prediction = db.query(models.Prediction).filter(models.Prediction.reading_id == reading.id).first()
-    latest_milk = db.query(models.MilkProduction).filter(models.MilkProduction.cattle_id == c.cattle_id).order_by(models.MilkProduction.date.desc()).first()
-    latest_feed = db.query(models.FeedConsumption).filter(models.FeedConsumption.cattle_id == c.cattle_id).order_by(models.FeedConsumption.date.desc()).first()
-    latest_act = db.query(models.Activity).filter(models.Activity.cattle_id == c.cattle_id).order_by(models.Activity.date.desc()).first()
-    active_alerts = db.query(models.Alert).filter(models.Alert.cattle_id == c.cattle_id, models.Alert.status == "active").all()
-    return {
-        "cattle_id": c.cattle_id,
-        "name": c.name,
-        "breed": c.breed,
-        "age": c.age,
-        "gender": c.gender,
-        "dob": c.dob,
-        "notes": c.notes,
-        "status": c.status,
-        "latest_health": {
-            "timestamp": str(reading.timestamp) if reading else None,
-            "spo2": reading.spo2 if reading else None,
-            "heart_rate": reading.heart_rate if reading else None,
-            "temperature": reading.temperature if reading else None,
-            "humidity": reading.humidity if reading else None,
-            "ph": reading.ph if reading else None,
-            "ldr": reading.ldr if reading else None,
-            "step_count_today": reading.step_count_today if reading else (latest_act.steps if latest_act else None),
-            "step_count_lifetime": reading.step_count_lifetime if reading else None,
-            "acceleration_x": reading.acceleration_x if reading else None,
-            "acceleration_y": reading.acceleration_y if reading else None,
-            "acceleration_z": reading.acceleration_z if reading else None,
-            "accelerometer_valid": reading.accelerometer_valid if reading else False,
-            "heart_rate_valid": reading.heart_rate_valid if reading else False,
-            "spo2_valid": reading.spo2_valid if reading else False,
-            "temperature_valid": reading.temperature_valid if reading else False,
-            "ph_valid": reading.ph_valid if reading else False,
-            "ldr_valid": reading.ldr_valid if reading else False,
-            "overall_status": prediction.overall_status if prediction else None
-        },
-        "latest_milk": {
-            "quantity": latest_milk.quantity if latest_milk else None,
-            "unit": latest_milk.unit if latest_milk else None,
-            "date": str(latest_milk.date) if latest_milk else None
-        },
-        "latest_feed": {
-            "quantity": latest_feed.quantity if latest_feed else None,
-            "unit": latest_feed.unit if latest_feed else None,
-            "date": str(latest_feed.date) if latest_feed else None
-        },
-        "latest_activity": {
-            "steps": latest_act.steps if latest_act else None,
-            "date": str(latest_act.date) if latest_act else None
-        },
-        "active_alerts": [{"id": a.id, "alert_type": a.alert_type, "severity": a.severity, "timestamp": str(a.timestamp)} for a in active_alerts]
-    }
-
 @app.get("/api/cattle/{cattle_id}/latest")
-def get_latest_reading(cattle_id: str, db: Session = Depends(get_db)):
-    reading = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == cattle_id).order_by(models.SensorReading.timestamp.desc()).first()
+def get_latest_reading(cattle_id: str, include_simulated: bool = False, db: Session = Depends(get_db)):
+    reading_q = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == cattle_id)
+    if not include_simulated:
+        reading_q = reading_q.filter(models.SensorReading.is_simulated == False)
+    reading = reading_q.order_by(models.SensorReading.timestamp.desc()).first()
     if not reading:
         raise HTTPException(status_code=404, detail="No readings found")
     
@@ -593,6 +555,8 @@ def get_latest_reading(cattle_id: str, db: Session = Depends(get_db)):
         "device_connected": reading.device_connected,
         "ph": reading.ph,
         "ldr": reading.ldr,
+        "source": reading.source,
+        "is_simulated": reading.is_simulated,
         "fall_detected": fall_detected,
         "health": {
             "spo2": prediction.spo2_status if prediction else "unknown",
@@ -606,8 +570,11 @@ def get_latest_reading(cattle_id: str, db: Session = Depends(get_db)):
     }
 
 @app.get("/api/cattle/{cattle_id}/history")
-def get_history(cattle_id: str, limit: int = Query(default=20), db: Session = Depends(get_db)):
-    readings = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == cattle_id).order_by(models.SensorReading.timestamp.desc()).limit(limit).all()
+def get_history(cattle_id: str, limit: int = Query(default=20), include_simulated: bool = False, db: Session = Depends(get_db)):
+    readings_q = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == cattle_id)
+    if not include_simulated:
+        readings_q = readings_q.filter(models.SensorReading.is_simulated == False)
+    readings = readings_q.order_by(models.SensorReading.timestamp.desc()).limit(limit).all()
     result = []
     for r in readings:
         prediction = db.query(models.Prediction).filter(models.Prediction.reading_id == r.id).first()
@@ -623,6 +590,8 @@ def get_history(cattle_id: str, limit: int = Query(default=20), db: Session = De
             "mems_z": r.mems_z,
             "ph": r.ph,
             "ldr": r.ldr,
+            "source": r.source,
+            "is_simulated": r.is_simulated,
             "fall_detected": fall_detected,
             "health": {
                 "spo2": prediction.spo2_status if prediction else "unknown",
@@ -688,7 +657,10 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         else:
             attention_cows += 1
             
-        reading = db.query(models.SensorReading).filter(models.SensorReading.cattle_id == c.cattle_id).order_by(models.SensorReading.timestamp.desc()).first()
+        reading = db.query(models.SensorReading).filter(
+            models.SensorReading.cattle_id == c.cattle_id,
+            models.SensorReading.is_simulated == False
+        ).order_by(models.SensorReading.timestamp.desc()).first()
         if reading:
             if reading.heart_rate is not None:
                 heart_rate_sum += reading.heart_rate

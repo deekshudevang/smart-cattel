@@ -56,7 +56,8 @@ class BaselineEngine:
         
         # Sensor Readings (BPM, SpO2, Temperature)
         latest_sensor = db.query(models.SensorReading).filter(
-            models.SensorReading.cattle_id == cattle_id
+            models.SensorReading.cattle_id == cattle_id,
+            models.SensorReading.is_simulated == False
         ).order_by(models.SensorReading.timestamp.desc()).first()
         
         # Calculate baselines for sensors
@@ -66,6 +67,7 @@ class BaselineEngine:
             func.avg(models.SensorReading.temperature).label("avg_temp")
         ).filter(
             models.SensorReading.cattle_id == cattle_id,
+            models.SensorReading.is_simulated == False,
             models.SensorReading.timestamp >= start_time,
             models.SensorReading.timestamp <= end_time
         ).first()

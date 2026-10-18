@@ -9,60 +9,108 @@ class TelemetryPacket(BaseModel):
     timestamp: int
     device_connected: Optional[bool] = True
 
-    # Real Step Counting
+    # Real Step Counting (Canonical)
     step_count_today: Optional[int] = 0
     step_count_lifetime: Optional[int] = 0
     boot_count: Optional[int] = None
     chk: Optional[int] = None
 
-    # Accelerometer / MEMS (Phase 4 Contract + Legacy)
+    # Provenance & Tracking
+    source: Optional[str] = "serial"
+    is_simulated: Optional[bool] = False
+    raw_packet: Optional[str] = None
+    checksum_valid: Optional[bool] = True
+
+    # Accelerometer (Canonical)
     acceleration_x: Optional[float] = None
     acceleration_y: Optional[float] = None
     acceleration_z: Optional[float] = None
     accelerometer_valid: Optional[bool] = False
-    mems_x: Optional[float] = None
-    mems_y: Optional[float] = None
-    mems_z: Optional[float] = None
-    mems_valid: Optional[bool] = False
 
-    # SPO2 & Heart Rate (Phase 4 Contract + Legacy)
-    heart_rate_bpm: Optional[float] = None
+    # SPO2 & Heart Rate (Canonical)
     heart_rate: Optional[float] = None
     heart_rate_valid: Optional[bool] = False
-    bpm: Optional[float] = None
-    bpm_valid: Optional[bool] = False
     bpm_quality: Optional[float] = None
     max_state: Optional[str] = None
 
-    spo2_percent: Optional[float] = None
-    spo2_valid: Optional[bool] = False
     spo2: Optional[float] = None
+    spo2_valid: Optional[bool] = False
     spo2_quality: Optional[float] = None
 
-    # Temperature & Humidity
-    temperature_c: Optional[float] = None
-    temperature_valid: Optional[bool] = False
+    # Temperature & Humidity (Canonical)
     temperature: Optional[float] = None
+    temperature_valid: Optional[bool] = False
     humidity: Optional[float] = None
     humidity_valid: Optional[bool] = False
     sensor_quality: Optional[float] = None
     last_successful_read: Optional[int] = None
 
-    # pH Sensor
-    ph_value: Optional[float] = None
-    ph_valid: Optional[bool] = False
+    # pH Sensor (Canonical)
     ph: Optional[float] = None
+    ph_valid: Optional[bool] = False
 
-    # LDR Sensor
-    ldr_value: Optional[float] = None
-    ldr_valid: Optional[bool] = False
+    # LDR Sensor (Canonical)
     ldr: Optional[float] = None
+    ldr_valid: Optional[bool] = False
 
-    # GPS
+    # GPS (Canonical)
     gps_valid: Optional[bool] = False
     gps_lat: Optional[Union[float, str]] = None
     gps_lon: Optional[Union[float, str]] = None
     gps_satellites: Optional[int] = 0
+
+    # ── Deprecated Property Accessors (Sunset: 2026-12-31) ──
+    @property
+    def bpm(self) -> Optional[float]:
+        return self.heart_rate
+
+    @property
+    def heart_rate_bpm(self) -> Optional[float]:
+        return self.heart_rate
+
+    @property
+    def bpm_valid(self) -> Optional[bool]:
+        return self.heart_rate_valid
+
+    @property
+    def spo2_percent(self) -> Optional[float]:
+        return self.spo2
+
+    @property
+    def temperature_c(self) -> Optional[float]:
+        return self.temperature
+
+    @property
+    def ph_value(self) -> Optional[float]:
+        return self.ph
+
+    @property
+    def ldr_value(self) -> Optional[float]:
+        return self.ldr
+
+    @property
+    def mems_x(self) -> Optional[float]:
+        return self.acceleration_x
+
+    @property
+    def mems_y(self) -> Optional[float]:
+        return self.acceleration_y
+
+    @property
+    def mems_z(self) -> Optional[float]:
+        return self.acceleration_z
+
+    @property
+    def mems_valid(self) -> Optional[bool]:
+        return self.accelerometer_valid
+
+    @property
+    def steps_today(self) -> Optional[int]:
+        return self.step_count_today
+
+    @property
+    def lifetime_steps(self) -> Optional[int]:
+        return self.step_count_lifetime
 
     @model_validator(mode="before")
     @classmethod
@@ -74,148 +122,119 @@ class TelemetryPacket(BaseModel):
         if not data.get("cattle_id"):
             data["cattle_id"] = data.get("device_id", "CATTLE-001")
 
-        # 2. Acceleration / MEMS reconciliation
-        if data.get("acceleration_x") is not None and data.get("mems_x") is None:
-            data["mems_x"] = data["acceleration_x"]
-        elif data.get("mems_x") is not None and data.get("acceleration_x") is None:
-            data["acceleration_x"] = data["mems_x"]
+        # 2. Step counting alias mapping
+        if data.get("step_count_today") is None and data.get("steps_today") is not None:
+            data["step_count_today"] = data["steps_today"]
+        if data.get("step_count_lifetime") is None and data.get("lifetime_steps") is not None:
+            data["step_count_lifetime"] = data["lifetime_steps"]
 
-        if data.get("acceleration_y") is not None and data.get("mems_y") is None:
-            data["mems_y"] = data["acceleration_y"]
-        elif data.get("mems_y") is not None and data.get("acceleration_y") is None:
-            data["acceleration_y"] = data["mems_y"]
-
-        if data.get("acceleration_z") is not None and data.get("mems_z") is None:
-            data["mems_z"] = data["acceleration_z"]
-        elif data.get("mems_z") is not None and data.get("acceleration_z") is None:
-            data["acceleration_z"] = data["mems_z"]
+        # 3. Acceleration / MEMS reconciliation to canonical acceleration_x/y/z
+        ax = data.get("acceleration_x") if data.get("acceleration_x") is not None else (data.get("mems_x") if data.get("mems_x") is not None else data.get("ax"))
+        ay = data.get("acceleration_y") if data.get("acceleration_y") is not None else (data.get("mems_y") if data.get("mems_y") is not None else data.get("ay"))
+        az = data.get("acceleration_z") if data.get("acceleration_z") is not None else (data.get("mems_z") if data.get("mems_z") is not None else data.get("az"))
+        
+        data["acceleration_x"] = float(ax) if ax is not None else None
+        data["acceleration_y"] = float(ay) if ay is not None else None
+        data["acceleration_z"] = float(az) if az is not None else None
 
         accel_v = data.get("accelerometer_valid", data.get("mems_valid", False))
         data["accelerometer_valid"] = bool(accel_v)
-        data["mems_valid"] = bool(accel_v)
 
-        # 3. Heart Rate reconciliation & physiological range check (Safeguard 12)
-        hr_val = data.get("heart_rate_bpm") if data.get("heart_rate_bpm") is not None else (data.get("bpm") if data.get("bpm") is not None else data.get("heart_rate"))
+        # 4. Heart Rate reconciliation to canonical heart_rate & range check
+        hr_val = data.get("heart_rate") if data.get("heart_rate") is not None else (data.get("heart_rate_bpm") if data.get("heart_rate_bpm") is not None else data.get("bpm"))
         if hr_val is not None:
             try:
                 hr_num = float(hr_val)
                 if 20.0 <= hr_num <= 300.0:
-                    data["heart_rate_bpm"] = hr_num
-                    data["bpm"] = hr_num
                     data["heart_rate"] = hr_num
                 else:
-                    data["heart_rate_bpm"] = None
-                    data["bpm"] = None
                     data["heart_rate"] = None
                     data["heart_rate_valid"] = False
-                    data["bpm_valid"] = False
             except (ValueError, TypeError):
-                data["heart_rate_bpm"] = None
-                data["bpm"] = None
                 data["heart_rate"] = None
                 data["heart_rate_valid"] = False
         else:
-            data["heart_rate_bpm"] = None
-            data["bpm"] = None
             data["heart_rate"] = None
 
-        if data.get("heart_rate_bpm") is not None:
+        if data.get("heart_rate") is not None:
             hr_v = data.get("heart_rate_valid", data.get("bpm_valid", data.get("hr_valid", True)))
             data["heart_rate_valid"] = bool(hr_v)
-            data["bpm_valid"] = bool(hr_v)
         else:
             data["heart_rate_valid"] = False
-            data["bpm_valid"] = False
 
-        # 4. SpO2 reconciliation & range check (Safeguard 12)
-        spo2_val = data.get("spo2_percent") if data.get("spo2_percent") is not None else data.get("spo2")
+        # 5. SpO2 reconciliation to canonical spo2 & range check
+        spo2_val = data.get("spo2") if data.get("spo2") is not None else data.get("spo2_percent")
         if spo2_val is not None:
             try:
                 spo2_num = float(spo2_val)
                 if 30.0 <= spo2_num <= 100.0:
                     data["spo2"] = spo2_num
-                    data["spo2_percent"] = spo2_num
                     data["spo2_valid"] = bool(data.get("spo2_valid", True))
                 else:
                     data["spo2"] = None
-                    data["spo2_percent"] = None
                     data["spo2_valid"] = False
             except (ValueError, TypeError):
                 data["spo2"] = None
-                data["spo2_percent"] = None
                 data["spo2_valid"] = False
         else:
             data["spo2"] = None
-            data["spo2_percent"] = None
             data["spo2_valid"] = False
 
-        # 5. Temperature reconciliation & range check (Safeguard 12)
-        temp_val = data.get("temperature_c") if data.get("temperature_c") is not None else data.get("temperature")
+        # 6. Temperature reconciliation to canonical temperature & range check
+        temp_val = data.get("temperature") if data.get("temperature") is not None else data.get("temperature_c")
         if temp_val is not None:
             try:
                 temp_num = float(temp_val)
                 if -20.0 <= temp_num <= 80.0:
                     data["temperature"] = temp_num
-                    data["temperature_c"] = temp_num
                     data["temperature_valid"] = bool(data.get("temperature_valid", data.get("temp_valid", True)))
                 else:
                     data["temperature"] = None
-                    data["temperature_c"] = None
                     data["temperature_valid"] = False
             except (ValueError, TypeError):
                 data["temperature"] = None
-                data["temperature_c"] = None
                 data["temperature_valid"] = False
         else:
             data["temperature"] = None
-            data["temperature_c"] = None
             data["temperature_valid"] = False
 
-        # 6. pH reconciliation & range check (Safeguard 12)
-        ph_val = data.get("ph_value") if data.get("ph_value") is not None else data.get("ph")
+        # 7. pH reconciliation to canonical ph & range check
+        ph_val = data.get("ph") if data.get("ph") is not None else data.get("ph_value")
         if ph_val is not None:
             try:
                 ph_num = float(ph_val)
                 if 0.0 <= ph_num <= 14.0:
                     data["ph"] = ph_num
-                    data["ph_value"] = ph_num
                     data["ph_valid"] = bool(data.get("ph_valid", True))
                 else:
                     data["ph"] = None
-                    data["ph_value"] = None
                     data["ph_valid"] = False
             except (ValueError, TypeError):
                 data["ph"] = None
-                data["ph_value"] = None
                 data["ph_valid"] = False
         else:
             data["ph"] = None
-            data["ph_value"] = None
             data["ph_valid"] = False
 
-        # 7. LDR reconciliation & range check (Safeguard 12)
-        ldr_val = data.get("ldr_value") if data.get("ldr_value") is not None else data.get("ldr")
+        # 8. LDR reconciliation to canonical ldr & range check (preserving 0 lux)
+        ldr_val = data.get("ldr") if data.get("ldr") is not None else data.get("ldr_value")
         if ldr_val is not None:
             try:
                 ldr_num = float(ldr_val)
                 if 0.0 <= ldr_num <= 1024.0:
                     data["ldr"] = ldr_num
-                    data["ldr_value"] = ldr_num
                     data["ldr_valid"] = bool(data.get("ldr_valid", True))
                 else:
                     data["ldr"] = None
-                    data["ldr_value"] = None
                     data["ldr_valid"] = False
             except (ValueError, TypeError):
                 data["ldr"] = None
-                data["ldr_value"] = None
                 data["ldr_valid"] = False
         else:
             data["ldr"] = None
-            data["ldr_value"] = None
             data["ldr_valid"] = False
 
-        # 8. GPS coordinates to float when possible
+        # 9. GPS coordinates to float when possible
         for k in ("gps_lat", "gps_lon"):
             v = data.get(k)
             if v is not None:

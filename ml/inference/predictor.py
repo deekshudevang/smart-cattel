@@ -44,6 +44,17 @@ class HealthPredictor:
             if "activity" not in sensor_data:
                 sensor_data["activity"] = abs(sensor_data["acceleration_magnitude"] - 9.81)
                 
+        # Check if all key vital sensors are None/unconnected
+        vitals = [sensor_data.get("heart_rate"), sensor_data.get("spo2"), sensor_data.get("temperature"), sensor_data.get("ph")]
+        if all(v is None for v in vitals):
+            return {
+                "overall": {
+                    "status": "normal",
+                    "confidence": 0.0,
+                    "reason": "Vitals not connected"
+                }
+            }
+
         # 2. Build feature vector
         vector = []
         for f in features:

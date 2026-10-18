@@ -152,7 +152,8 @@ class AuthoritativeStepManager:
             db.query(models.SensorReading)
             .filter(
                 models.SensorReading.cattle_id == cattle_id,
-                models.SensorReading.step_count_lifetime != None
+                models.SensorReading.step_count_lifetime != None,
+                models.SensorReading.is_simulated == False
             )
             .order_by(models.SensorReading.timestamp.desc())
             .first()
