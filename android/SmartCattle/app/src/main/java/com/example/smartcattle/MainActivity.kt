@@ -57,6 +57,7 @@ import com.example.smartcattle.data.local.AppDatabase
 import com.example.smartcattle.data.local.CowEntity
 import com.example.smartcattle.data.local.toCowProfile
 import com.example.smartcattle.data.local.toEntity
+import com.example.smartcattle.data.model.formatAlertDateTime
 import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -791,7 +792,7 @@ class CattleViewModel : ViewModel() {
                 val tag = if (a.fall_detected) "FALL" else "WARNING"
                 val color = if (a.fall_detected) Red else Orange
                 val msg = a.details.joinToString(" • ").ifEmpty { "Abnormal readings for ${a.cattle_id}" }
-                Alert(a.cattle_name.ifEmpty { a.cattle_id }, msg, a.timestamp.take(16), tag, color)
+                Alert(a.cattle_name.ifEmpty { a.cattle_id }, msg, formatAlertDateTime(a.timestamp), tag, color)
             }
         } catch (e: Exception) { e.printStackTrace() }
     }
@@ -1114,7 +1115,8 @@ class CattleViewModel : ViewModel() {
                                 val msg = alertDetails.ifEmpty { "Abnormal readings for $cid" }
                                 val tag = if (fallDetected) "FALL" else "WARNING"
                                 val color = if (fallDetected) Red else Orange
-                                _alerts.value = (listOf(Alert(cid, msg, "Just now", tag, color)) + _alerts.value).take(10)
+                                val currentAlertTime = SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.getDefault()).format(Date())
+                                _alerts.value = (listOf(Alert(cid, msg, currentAlertTime, tag, color)) + _alerts.value).take(10)
                             }
                         }
                     } catch (e: Exception) {
@@ -2290,11 +2292,22 @@ fun AlertCard(alert: Alert) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                Text(
-                    text = alert.time,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AccessTime,
+                        contentDescription = "Alert Time",
+                        modifier = Modifier.size(12.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                    Text(
+                        text = alert.time,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
             }
         }
     }

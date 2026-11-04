@@ -11,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -21,6 +22,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.smartcattle.data.model.AlertRow
+import com.example.smartcattle.data.model.formatAlertDateTime
 import com.example.smartcattle.viewmodel.CattleViewModel
 
 private val BgDark   = Color(0xFF0D1117)
@@ -94,7 +96,7 @@ fun AlertsScreen(viewModel: CattleViewModel) {
 @Composable
 private fun AlertCard(alert: AlertRow) {
     val accentColor = if (alert.fallDetected) Red else Amber
-    val ts = alert.timestamp.take(19).replace("T", " ")
+    val ts = formatAlertDateTime(alert.timestamp)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -144,7 +146,18 @@ private fun AlertCard(alert: AlertRow) {
                 }
                 Spacer(Modifier.height(6.dp))
                 Text("${alert.cattleName}  ·  ${alert.cattleId}", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                Text(ts, color = Muted, fontSize = 11.sp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AccessTime,
+                        contentDescription = "Alert Time",
+                        tint = Muted,
+                        modifier = Modifier.size(11.dp)
+                    )
+                    Text(ts, color = Muted, fontSize = 11.sp)
+                }
 
                 if (alert.details.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))

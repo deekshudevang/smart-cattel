@@ -1,6 +1,7 @@
 package com.example.smartcattle.data.api
 
 import com.example.smartcattle.data.model.AlertRow
+import com.example.smartcattle.data.model.formatAlertDateTime
 import com.example.smartcattle.data.model.HealthStatus
 import com.example.smartcattle.data.model.HistoryRow
 import com.example.smartcattle.data.model.SensorData
@@ -225,7 +226,7 @@ interface CattleApi {
 // Mappers — convert raw API shapes to clean domain models
 fun ApiLatestResponse.toSensorData() = SensorData(
     cattleId = cattle_id,
-    timestamp = timestamp,
+    timestamp = formatAlertDateTime(timestamp),
     spo2 = spo2,
     heart_rate = heart_rate,
     temperature = temperature,
@@ -258,7 +259,7 @@ fun ApiLatestResponse.toSensorData() = SensorData(
 )
 
 fun ApiHistoryResponse.toHistoryRow() = HistoryRow(
-    timestamp = timestamp,
+    timestamp = formatAlertDateTime(timestamp),
     spo2 = spo2,
     heart_rate = heart_rate,
     temperature = temperature,
@@ -277,7 +278,7 @@ fun ApiHistoryResponse.toHistoryRow() = HistoryRow(
 fun ApiAlertResponse.toAlertRow() = AlertRow(
     cattleId = cattle_id,
     cattleName = cattle_name,
-    timestamp = timestamp,
+    timestamp = formatAlertDateTime(timestamp),
     fallDetected = fall_detected,
     details = details
 )

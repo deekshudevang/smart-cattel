@@ -151,3 +151,58 @@ def test_steps_not_counted_when_accelerometer_invalid():
         assert today2 == today1
     finally:
         db.close()
+
+
+def test_alerts_endpoint_returns_timezone_aware_real_datetime():
+    """Verify that /api/alerts returns ISO-8601 timestamps with timezone information."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.database.database import SessionLocal
+    from app.database import models
+    from datetime import datetime, timezone
+
+    client = TestClient(app)
+    db = SessionLocal()
+    try:
+        cid = "ALERT-TEST-COW"
+        cow = db.query(models.Cattle).filter(models.Cattle.cattle_id == cid).first()
+        if not cow:
+            cow = models.Cattle(cattle_id=cid, name="AlertCow", breed="Jersey", age=2)
+            db.add(cow)
+            db.commit()
+
+        reading = models.SensorReading(
+            cattle_id=cid,
+            heart_rate=140,
+            spo2=80.0,
+            temperature=41.5,
+            timestamp=datetime.now(timezone.utc)
+        )
+        db.add(reading)
+        db.commit()
+
+        pred = models.Prediction(
+            reading_id=reading.id,
+            overall_status="abnormal",
+            heart_rate_status="abnormal",
+            spo2_status="abnormal",
+            temperature_status="abnormal",
+            timestamp=datetime.now(timezone.utc)
+        )
+        db.add(pred)
+        db.commit()
+
+        res = client.get("/api/alerts")
+        assert res.status_code == 200
+        alerts = res.json()
+        assert len(alerts) > 0
+
+        # Find our created alert
+        alert = next((a for a in alerts if a["cattle_id"] == cid), alerts[0])
+        ts = alert.get("timestamp")
+        assert ts is not None
+        # Must be ISO-8601 formatted with timezone or T delimiter
+        assert "T" in ts
+        assert len(ts) >= 19
+    finally:
+        db.close()

@@ -664,10 +664,20 @@ def get_alerts(db: Session = Depends(get_db)):
         if p.temperature_status == "abnormal": details.append(f"Temp abnormal ({reading.temperature}°C)" if reading else "Temp abnormal")
         if p.ph_status == "abnormal": details.append(f"pH abnormal ({reading.ph})" if reading else "pH abnormal")
         if p.ldr_status == "abnormal": details.append(f"Light abnormal ({reading.ldr} lux)" if reading else "Light abnormal")
+        ts = p.timestamp
+        if ts is not None:
+            if getattr(ts, 'tzinfo', None) is None:
+                ts_utc = ts.replace(tzinfo=timezone.utc)
+            else:
+                ts_utc = ts
+        else:
+            ts_utc = datetime.now(timezone.utc)
+        ts_iso = ts_utc.isoformat()
+
         alerts.append({
             "cattle_id": reading.cattle_id if reading else "unknown",
             "cattle_name": cattle.name if cattle else "Unknown",
-            "timestamp": str(p.timestamp),
+            "timestamp": ts_iso,
             "fall_detected": fall_detected,
             "details": details,
         })

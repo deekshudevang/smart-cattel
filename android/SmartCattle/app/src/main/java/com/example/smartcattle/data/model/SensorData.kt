@@ -1,5 +1,86 @@
 package com.example.smartcattle.data.model
 
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+
+/**
+ * Format raw alert timestamps (ISO-8601, UTC, SQL datetime, epoch, or empty)
+ * into a clear, human-readable real date and time: "dd MMM yyyy, hh:mm:ss a"
+ * (e.g., "04 Nov 2026, 09:25:30 PM") using the device's local timezone.
+ */
+fun formatAlertDateTime(rawTimestamp: String?): String {
+    val displayFormat = SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.getDefault())
+    if (rawTimestamp.isNullOrBlank()) {
+        return displayFormat.format(Date())
+    }
+
+    val trimmed = rawTimestamp.trim()
+
+    // Already in readable date+time format
+    if (trimmed.contains(",") && (trimmed.endsWith("AM", ignoreCase = true) || trimmed.endsWith("PM", ignoreCase = true))) {
+        return trimmed
+    }
+
+    // Epoch timestamp
+    trimmed.toLongOrNull()?.let { epoch ->
+        val millis = if (epoch < 100_000_000_000L) epoch * 1000L else epoch
+        return displayFormat.format(Date(millis))
+    }
+
+    val patterns = listOf(
+        "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX",
+        "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ",
+        "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+        "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
+        "yyyy-MM-dd'T'HH:mm:ssXXX",
+        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+        "yyyy-MM-dd'T'HH:mm:ss",
+        "yyyy-MM-dd HH:mm:ss.SSSSSS",
+        "yyyy-MM-dd HH:mm:ss.SSS",
+        "yyyy-MM-dd HH:mm:ss",
+        "yyyy-MM-dd"
+    )
+
+    for (pattern in patterns) {
+        try {
+            val parser = SimpleDateFormat(pattern, Locale.US)
+            val hasTz = pattern.contains("Z") || pattern.contains("XXX") || pattern.contains("'Z'") ||
+                    trimmed.endsWith("Z", ignoreCase = true) ||
+                    trimmed.matches(Regex(".*[+-]\\d{2}:?\\d{2}$"))
+            if (hasTz) {
+                parser.timeZone = TimeZone.getTimeZone("UTC")
+            } else {
+                // Backend timestamps without explicit offset are stored in UTC
+                parser.timeZone = TimeZone.getTimeZone("UTC")
+            }
+            val date = parser.parse(trimmed)
+            if (date != null) {
+                return displayFormat.format(date)
+            }
+        } catch (_: Exception) {}
+    }
+
+    // Android O+ java.time fallback
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        try {
+            val instant = java.time.Instant.parse(trimmed)
+            val zdt = instant.atZone(java.time.ZoneId.systemDefault())
+            val formatter = java.time.format.DateTimeFormatter.ofPattern("dd MMM yyyy, hh:mm:ss a", Locale.getDefault())
+            return zdt.format(formatter)
+        } catch (_: Exception) {}
+        try {
+            val ldt = java.time.LocalDateTime.parse(trimmed)
+            val zdt = ldt.atZone(java.time.ZoneOffset.UTC).withZoneSameInstant(java.time.ZoneId.systemDefault())
+            val formatter = java.time.format.DateTimeFormatter.ofPattern("dd MMM yyyy, hh:mm:ss a", Locale.getDefault())
+            return zdt.format(formatter)
+        } catch (_: Exception) {}
+    }
+
+    return trimmed
+}
+
 data class HealthStatus(
     val spo2: String = "unknown",
     val heart_rate: String = "unknown",

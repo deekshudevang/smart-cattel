@@ -2,6 +2,7 @@ package com.example.smartcattle
 
 import com.example.smartcattle.data.local.toEntity
 import com.example.smartcattle.data.local.toCowProfile
+import com.example.smartcattle.data.model.formatAlertDateTime
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -751,5 +752,45 @@ class SmartCattleVitalsAndSyncTest {
         assertEquals("gain", trend)
         assertTrue("Gain percentage must be positive", diffPct > 0f)
     }
-}
 
+    // ── Test 21: Real date and time formatting for alerts ──
+    @Test
+    fun testAlertRealTimeAndDateFormatting() {
+        val isoUtc = "2026-11-04T15:30:00Z"
+        val formattedIso = formatAlertDateTime(isoUtc)
+        assertNotNull(formattedIso)
+        assertTrue("Formatted date must contain year 2026", formattedIso.contains("2026"))
+        assertTrue("Formatted date must contain month", formattedIso.contains("Nov"))
+        assertTrue("Formatted date must contain AM or PM", formattedIso.endsWith("AM") || formattedIso.endsWith("PM"))
+
+        val sqlDatetime = "2026-11-04 15:30:00"
+        val formattedSql = formatAlertDateTime(sqlDatetime)
+        assertNotNull(formattedSql)
+        assertTrue("Formatted SQL timestamp must contain year 2026", formattedSql.contains("2026"))
+        assertTrue("Formatted SQL timestamp must contain month", formattedSql.contains("Nov"))
+
+        val blankFormatted = formatAlertDateTime("")
+        assertNotNull(blankFormatted)
+        assertTrue("Fallback must contain AM or PM", blankFormatted.endsWith("AM") || blankFormatted.endsWith("PM"))
+        assertFalse("Must never be hardcoded placeholder Just now", blankFormatted == "Just now")
+    }
+
+    // ── Test 22: Alert model captures real date and time instead of 'Just now' placeholder ──
+    @Test
+    fun testAlertModelDisplaysRealDateTimeNotPlaceholder() {
+        val cid = "CATTLE-001"
+        val msg = "SpO2 abnormal (82%) • Heart Rate abnormal (130 bpm)"
+        val realTimestamp = formatAlertDateTime("2026-11-04T15:30:00Z")
+        val alert = Alert(
+            cattle = cid,
+            msg = msg,
+            time = realTimestamp,
+            tag = "WARNING",
+            color = androidx.compose.ui.graphics.Color(0xFFF85149)
+        )
+
+        assertFalse("Alert time must not be 'Just now'", alert.time == "Just now")
+        assertTrue("Alert time must include date", alert.time.contains("2026"))
+        assertTrue("Alert time must include time indicator", alert.time.contains(":") && (alert.time.contains("AM") || alert.time.contains("PM")))
+    }
+}
