@@ -134,3 +134,4 @@ def get_steps_statistics(
 
     stats = DatabaseService.get_step_statistics(cattle_id, include_simulated)
     return stats
+

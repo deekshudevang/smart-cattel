@@ -595,8 +595,7 @@ class SensorService:
                 boot_count=boot_count
             )
             validated_data["step_count_today"] = auth_today
-            if incoming_lifetime is not None:
-                validated_data["step_count_lifetime"] = auth_life
+            validated_data["step_count_lifetime"] = auth_life
 
             # Persist steps to Activity table for today in configured timezone
             local_now = AuthoritativeStepManager.get_local_now()

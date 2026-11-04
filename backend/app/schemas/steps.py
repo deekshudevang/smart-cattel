@@ -40,3 +40,4 @@ class CattleStepStatisticsResponse(BaseModel):
     activity_status: str
     step_sensor_status: str
     last_updated: Optional[datetime] = None
+

@@ -313,6 +313,17 @@ def get_cows(include_simulated: bool = False, db: Session = Depends(get_db)):
         latest_act = db.query(models.Activity).filter(models.Activity.cattle_id == c.cattle_id).order_by(models.Activity.date.desc()).first()
         active_alerts = db.query(models.Alert).filter(models.Alert.cattle_id == c.cattle_id, models.Alert.status == "active").count()
         device = db.query(models.Device).filter(models.Device.cattle_id == c.cattle_id).first()
+        latest_step_record = db.query(models.CattleStepReading).filter(
+            models.CattleStepReading.cattle_id == c.cattle_id
+        ).order_by(models.CattleStepReading.measured_at.desc()).first()
+
+        step_today_val = reading.step_count_today if (reading and reading.step_count_today is not None) else (
+            latest_step_record.steps_today if latest_step_record else (latest_act.steps if latest_act else None)
+        )
+        step_life_val = reading.step_count_lifetime if (reading and reading.step_count_lifetime is not None) else (
+            latest_step_record.total_steps if latest_step_record else None
+        )
+
         results.append({
             "cattle_id": c.cattle_id,
             "name": c.name,
@@ -343,8 +354,8 @@ def get_cows(include_simulated: bool = False, db: Session = Depends(get_db)):
                 "weight_calibrated": reading.weight_calibrated if reading else False,
                 "weight_valid": reading.weight_valid if reading else (True if c and c.weight else False),
                 "weight_sensor_status": reading.weight_sensor_status if reading else ("stable" if c and c.weight else "disconnected"),
-                "step_count_today": reading.step_count_today if reading else (latest_act.steps if latest_act else None),
-                "step_count_lifetime": reading.step_count_lifetime if reading else None,
+                "step_count_today": step_today_val,
+                "step_count_lifetime": step_life_val,
                 "acceleration_x": reading.acceleration_x if reading else None,
                 "acceleration_y": reading.acceleration_y if reading else None,
                 "acceleration_z": reading.acceleration_z if reading else None,
@@ -397,6 +408,17 @@ def get_cow(cattle_id: str, include_simulated: bool = False, db: Session = Depen
     latest_act = db.query(models.Activity).filter(models.Activity.cattle_id == c.cattle_id).order_by(models.Activity.date.desc()).first()
     active_alerts = db.query(models.Alert).filter(models.Alert.cattle_id == c.cattle_id, models.Alert.status == "active").count()
     device = db.query(models.Device).filter(models.Device.cattle_id == c.cattle_id).first()
+    latest_step_record = db.query(models.CattleStepReading).filter(
+        models.CattleStepReading.cattle_id == c.cattle_id
+    ).order_by(models.CattleStepReading.measured_at.desc()).first()
+
+    step_today_val = reading.step_count_today if (reading and reading.step_count_today is not None) else (
+        latest_step_record.steps_today if latest_step_record else (latest_act.steps if latest_act else None)
+    )
+    step_life_val = reading.step_count_lifetime if (reading and reading.step_count_lifetime is not None) else (
+        latest_step_record.total_steps if latest_step_record else None
+    )
+
     return {
         "cattle_id": c.cattle_id,
         "name": c.name,
@@ -427,8 +449,8 @@ def get_cow(cattle_id: str, include_simulated: bool = False, db: Session = Depen
             "weight_calibrated": reading.weight_calibrated if reading else False,
             "weight_valid": reading.weight_valid if reading else (True if c and c.weight else False),
             "weight_sensor_status": reading.weight_sensor_status if reading else ("stable" if c and c.weight else "disconnected"),
-            "step_count_today": reading.step_count_today if reading else (latest_act.steps if latest_act else None),
-            "step_count_lifetime": reading.step_count_lifetime if reading else None,
+            "step_count_today": step_today_val,
+            "step_count_lifetime": step_life_val,
             "acceleration_x": reading.acceleration_x if reading else None,
             "acceleration_y": reading.acceleration_y if reading else None,
             "acceleration_z": reading.acceleration_z if reading else None,
@@ -576,6 +598,17 @@ def get_latest_reading(cattle_id: str, include_simulated: bool = False, db: Sess
     prediction = db.query(models.Prediction).filter(models.Prediction.reading_id == reading.id).first()
     
     fall_detected = (prediction.mems_status == "abnormal") if prediction else False
+    latest_step_rec = db.query(models.CattleStepReading).filter(
+        models.CattleStepReading.cattle_id == cattle_id
+    ).order_by(models.CattleStepReading.measured_at.desc()).first()
+
+    step_today = reading.step_count_today if reading.step_count_today is not None else (
+        latest_step_rec.steps_today if latest_step_rec else None
+    )
+    step_lifetime = reading.step_count_lifetime if reading.step_count_lifetime is not None else (
+        latest_step_rec.total_steps if latest_step_rec else None
+    )
+
     return {
         "cattle_id": reading.cattle_id,
         "timestamp": str(reading.timestamp),
@@ -589,8 +622,14 @@ def get_latest_reading(cattle_id: str, include_simulated: bool = False, db: Sess
         "acceleration_x": reading.acceleration_x,
         "acceleration_y": reading.acceleration_y,
         "acceleration_z": reading.acceleration_z,
-        "step_count_today": reading.step_count_today,
-        "step_count_lifetime": reading.step_count_lifetime,
+        "step_count_today": step_today,
+        "step_count_lifetime": step_lifetime,
+        "body_weight_kg": reading.body_weight_kg,
+        "weight_raw": reading.weight_raw,
+        "weight_stable": reading.weight_stable,
+        "weight_calibrated": reading.weight_calibrated,
+        "weight_valid": reading.weight_valid,
+        "weight_sensor_status": reading.weight_sensor_status,
         "accelerometer_valid": reading.accelerometer_valid,
         "heart_rate_valid": reading.heart_rate_valid,
         "spo2_valid": reading.spo2_valid,
@@ -635,6 +674,10 @@ def get_history(cattle_id: str, limit: int = Query(default=20), include_simulate
             "mems_z": r.mems_z,
             "ph": r.ph,
             "ldr": r.ldr,
+            "body_weight_kg": r.body_weight_kg,
+            "weight_stable": r.weight_stable,
+            "step_count_today": r.step_count_today,
+            "step_count_lifetime": r.step_count_lifetime,
             "source": r.source,
             "is_simulated": r.is_simulated,
             "fall_detected": fall_detected,

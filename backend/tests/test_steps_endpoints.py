@@ -187,3 +187,4 @@ def test_disconnected_accelerometer_gates_step_counting():
         assert t2 == t1
     finally:
         db.close()
+

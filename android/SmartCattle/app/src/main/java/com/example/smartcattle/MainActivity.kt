@@ -134,7 +134,9 @@ data class Cattle(
     val memsZ: Float? = null,
     val fallDetected: Boolean = false,
     val weightStable: Boolean = false,
-    val weightCalibrated: Boolean = false
+    val weightCalibrated: Boolean = false,
+    val stepsToday: Int? = null,
+    val stepsLifetime: Int? = null
 )
 data class Alert(val cattle: String, val msg: String, val time: String, val tag: String, val color: Color)
 
@@ -475,6 +477,8 @@ class CattleViewModel : ViewModel() {
                                 Sensor("ph", "pH Level", p.latestPh?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available", "", "Normal", Green, isValid = p.latestPh != null, reason = if (p.latestPh == null) "Probe not in solution" else null),
                                 Sensor("ldr", "Light", p.latestLdr?.let { "$it" } ?: "Not Available", "lux", "Normal", Green, isValid = p.latestLdr != null, reason = if (p.latestLdr == null) "Sensor not connected" else null),
                                 Sensor("weight", "Weight", p.latestWeight?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available", "kg", "Cached", Green, isValid = p.latestWeight != null, reason = if (p.latestWeight == null) "Sensor not connected" else null),
+                                Sensor("steps", "Steps", p.latestStepsToday?.let { "$it" } ?: "Not Available", "steps", if (p.latestStepsToday != null) "Active" else "Offline", if (p.latestStepsToday != null) Green else Grey, isValid = p.latestStepsToday != null, reason = if (p.latestStepsToday == null) "Sensor not connected" else null),
+                                Sensor("total_steps", "Total Steps", p.latestStepsLifetime?.let { "$it" } ?: "Not Available", "steps", if (p.latestStepsLifetime != null) "Tracking" else "Offline", if (p.latestStepsLifetime != null) Green else Grey, isValid = p.latestStepsLifetime != null, reason = if (p.latestStepsLifetime == null) "Sensor not connected" else null),
                                 Sensor("mems", "MEMS Accelerometer", if (p.latestAccelX != null && p.latestAccelY != null && p.latestAccelZ != null) String.format(Locale.US, "X:%.1f Y:%.1f Z:%.1f", p.latestAccelX, p.latestAccelY, p.latestAccelZ) else "Not Available", "m/s²", "Cached", Green, isValid = p.latestAccelX != null, reason = if (p.latestAccelX == null) "Sensor not connected" else null)
                             ),
                             dataSource = "Cached",
@@ -486,7 +490,9 @@ class CattleViewModel : ViewModel() {
                             memsZ = p.latestAccelZ,
                             fallDetected = false,
                             weightStable = p.latestWeightStable,
-                            weightCalibrated = true
+                            weightCalibrated = true,
+                            stepsToday = p.latestStepsToday,
+                            stepsLifetime = p.latestStepsLifetime
                         )
                     }
                 }
@@ -737,6 +743,16 @@ class CattleViewModel : ViewModel() {
         val isSimulated = r.is_simulated ?: false
         val dataSource = if (isSimulated) "Simulated" else "Live from sensor"
 
+        val stepsTodayVal = if (r.step_count_today != null) "${r.step_count_today}" else "Not Available"
+        val stepsTodayStatus = if (stepsTodayVal == "Not Available") "Offline" else "Active"
+        val stepsTodayColor = if (stepsTodayVal == "Not Available") Grey else Green
+        val stepsTodayReason = if (stepsTodayVal == "Not Available") "Sensor not connected" else null
+
+        val totalStepsVal = if (r.step_count_lifetime != null) "${r.step_count_lifetime}" else "Not Available"
+        val totalStepsStatus = if (totalStepsVal == "Not Available") "Offline" else "Tracking"
+        val totalStepsColor = if (totalStepsVal == "Not Available") Grey else Green
+        val totalStepsReason = if (totalStepsVal == "Not Available") "Sensor not connected" else null
+
         val sensors = listOf(
             Sensor("hr", "Heart Rate", hrVal, "bpm", sStatus(r.health.heart_rate), sColor(r.health.heart_rate), isValid = hrVal != "Not Available", reason = hrReason),
             Sensor("spo2", "SpO2", spo2Val, "%", sStatus(r.health.spo2), sColor(r.health.spo2), isValid = spo2Val != "Not Available", reason = spo2Reason),
@@ -744,6 +760,8 @@ class CattleViewModel : ViewModel() {
             Sensor("ph", "pH Level", phVal, "", sStatus(r.health.ph), sColor(r.health.ph), isValid = phVal != "Not Available", reason = phReason),
             Sensor("ldr", "Light", ldrVal, "lux", sStatus(r.health.ldr), sColor(r.health.ldr), isValid = ldrVal != "Not Available", reason = ldrReason),
             Sensor("weight", "Weight", weightVal, "kg", weightStatus, weightColor, isValid = weightVal != "Not Available", reason = weightReason),
+            Sensor("steps", "Steps", stepsTodayVal, "steps", stepsTodayStatus, stepsTodayColor, isValid = stepsTodayVal != "Not Available", reason = stepsTodayReason),
+            Sensor("total_steps", "Total Steps", totalStepsVal, "steps", totalStepsStatus, totalStepsColor, isValid = totalStepsVal != "Not Available", reason = totalStepsReason),
             Sensor("mems", "MEMS Accelerometer", accelStr, "m/s²", if (fallDetected) "Fall Detected" else sStatus(r.health.mems), if (fallDetected) Red else sColor(r.health.mems), isValid = accelStr != "Not Available", reason = accelReason)
         )
         val overall = if (r.health.overall == "abnormal") "At Risk" else "Healthy"
@@ -764,7 +782,9 @@ class CattleViewModel : ViewModel() {
             memsZ = r.acceleration_z ?: r.mems_z,
             fallDetected = fallDetected,
             weightStable = weightStable,
-            weightCalibrated = r.weight_calibrated ?: false
+            weightCalibrated = r.weight_calibrated ?: false,
+            stepsToday = r.step_count_today,
+            stepsLifetime = r.step_count_lifetime
         )
     }
 
@@ -774,12 +794,19 @@ class CattleViewModel : ViewModel() {
             val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
             val histRows = rows.map { r ->
                 val ts = try { timeFormat.format(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).parse(r.timestamp.take(19)) ?: Date()) } catch (e: Exception) { r.timestamp.take(8) }
-                listOf(ts, r.spo2?.let { if (it <= 0) "Not Available" else "$it" } ?: "Not Available", r.heart_rate?.let { if (it <= 0) "Not Available" else "$it" } ?: "Not Available",
+                listOf(
+                    ts,
+                    r.spo2?.let { if (it <= 0) "Not Available" else "$it" } ?: "Not Available",
+                    r.heart_rate?.let { if (it <= 0) "Not Available" else "$it" } ?: "Not Available",
                     r.temperature?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available",
                     r.humidity?.let { String.format(Locale.US, "%.0f", it) } ?: "Not Available",
                     r.ph?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available",
                     if (r.fall_detected) "FALL" else "",
-                    if (r.health.overall == "normal") "OK" else "WARN")
+                    if (r.health.overall == "normal") "OK" else "WARN",
+                    r.body_weight_kg?.let { String.format(Locale.US, "%.1f kg", it) } ?: "Not Available",
+                    r.step_count_today?.let { "$it" } ?: "Not Available",
+                    r.step_count_lifetime?.let { "$it" } ?: "Not Available"
+                )
             }
             _history.value = histRows.take(20)
         } catch (e: Exception) { e.printStackTrace() }
@@ -1065,7 +1092,9 @@ class CattleViewModel : ViewModel() {
                                 memsZ = rawAccelZ,
                                 fallDetected = fallDetected,
                                 weightStable = weightStable,
-                                weightCalibrated = weightCalibrated
+                                weightCalibrated = weightCalibrated,
+                                stepsToday = effectiveStepsToday,
+                                stepsLifetime = effectiveStepsLifetime
                             )
 
                             android.util.Log.i("SmartCattle", "[ANDROID WS RAW MESSAGE] $text")
@@ -2053,29 +2082,31 @@ fun CattleTelemetrySection(cattle: Cattle, onOpenWeight: (String) -> Unit = {}) 
                 ) {
                     Box(modifier = Modifier.weight(1f)) {
                         val s = stepsSensor
-                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        val resolvedVal = s?.value ?: (cattle.stepsToday?.toString() ?: "Not Available")
+                        val valStr = if (cattle.isStale && s == null && cattle.stepsToday == null) "Not Available" else resolvedVal
                         MetricCard(
                             label = "Steps",
                             value = valStr,
                             unit = if (valStr == "Not Available") "" else "steps",
                             icon = Icons.Default.DirectionsWalk,
-                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: "Active",
-                            statusColor = if (cattle.isStale) Grey else s?.color ?: Green,
-                            isValid = (s?.isValid == true) && valStr != "Not Available" && !cattle.isStale,
+                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: (if (valStr != "Not Available") "Active" else "Offline"),
+                            statusColor = if (cattle.isStale) Grey else s?.color ?: (if (valStr != "Not Available") Green else Grey),
+                            isValid = (s?.isValid == true || cattle.stepsToday != null) && valStr != "Not Available" && !cattle.isStale,
                             subtitle = if (cattle.isStale) "Disconnected" else s?.reason ?: "Today's steps"
                         )
                     }
                     Box(modifier = Modifier.weight(1f)) {
                         val s = totalStepsSensor
-                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        val resolvedVal = s?.value ?: (cattle.stepsLifetime?.toString() ?: "Not Available")
+                        val valStr = if (cattle.isStale && s == null && cattle.stepsLifetime == null) "Not Available" else resolvedVal
                         MetricCard(
                             label = "Total Steps",
                             value = valStr,
                             unit = if (valStr == "Not Available") "" else "steps",
                             icon = Icons.Default.Timeline,
-                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: "Tracking",
-                            statusColor = if (cattle.isStale) Grey else s?.color ?: Green,
-                            isValid = (s?.isValid == true) && valStr != "Not Available" && !cattle.isStale,
+                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: (if (valStr != "Not Available") "Tracking" else "Offline"),
+                            statusColor = if (cattle.isStale) Grey else s?.color ?: (if (valStr != "Not Available") Green else Grey),
+                            isValid = (s?.isValid == true || cattle.stepsLifetime != null) && valStr != "Not Available" && !cattle.isStale,
                             subtitle = if (cattle.isStale) "Disconnected" else s?.reason ?: "Cumulative"
                         )
                     }
@@ -2416,7 +2447,10 @@ fun HistoryTab(viewModel: CattleViewModel) {
                 val hum = row.getOrNull(4) ?: "N/A"
                 val ph = row.getOrNull(5) ?: "N/A"
                 val hasFall = row.getOrNull(6) in listOf("FALL", "Fall", "\uD83D\uDEA8")
-                val isHealthy = row.lastOrNull() in listOf("OK", "✓", "Healthy")
+                val isHealthy = row.getOrNull(7) in listOf("OK", "✓", "Healthy")
+                val weight = row.getOrNull(8) ?: "N/A"
+                val steps = row.getOrNull(9) ?: "N/A"
+                val totalSteps = row.getOrNull(10) ?: "N/A"
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -2478,6 +2512,18 @@ fun HistoryTab(viewModel: CattleViewModel) {
                             HistoryItem(label = "Temp", value = if (temp != "Not Available") "$temp°C" else "N/A")
                             HistoryItem(label = "Hum", value = if (hum != "Not Available") "$hum%" else "N/A")
                             HistoryItem(label = "pH", value = ph)
+                        }
+
+                        if (weight != "N/A" || steps != "N/A" || totalSteps != "N/A") {
+                            Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                HistoryItem(label = "Weight", value = if (weight != "Not Available") weight else "N/A")
+                                HistoryItem(label = "Steps", value = if (steps != "Not Available") "$steps steps" else "N/A")
+                                HistoryItem(label = "Total Steps", value = if (totalSteps != "Not Available") "$totalSteps steps" else "N/A")
+                            }
                         }
                     }
                 }
@@ -3123,14 +3169,34 @@ fun CowProfileScreen(
                             .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                     )
 
-                    // Row 2: pH Level, Light (LDR), Steps Today
+                    // Row 2: pH Level, Light (LDR), Weight
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         MiniStatCard("pH Level", cow.latestPh?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available", Icons.Default.Science)
                         MiniStatCard("Light", cow.latestLdr?.let { "$it lux" } ?: "Not Available", Icons.Default.LightMode)
-                        MiniStatCard("Steps Today", (cow.latestStepsToday ?: cow.latestActivitySteps)?.let { "$it steps" } ?: "Not Available", Icons.Default.DirectionsWalk)
+                        MiniStatCard("Weight", cow.latestWeight?.let { String.format(Locale.US, "%.1f kg", it) } ?: "Not Available", Icons.Default.Scale)
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    )
+
+                    // Row 3: Steps Today, Total Steps
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(spacing.md)
+                    ) {
+                        Box(Modifier.weight(1f)) {
+                            MiniStatCard("Steps Today", (cow.latestStepsToday ?: cow.latestActivitySteps)?.let { "$it steps" } ?: "Not Available", Icons.Default.DirectionsWalk)
+                        }
+                        Box(Modifier.weight(1f)) {
+                            MiniStatCard("Total Steps", cow.latestStepsLifetime?.let { "$it steps" } ?: "Not Available", Icons.Default.Timeline)
+                        }
                     }
 
                     Box(
@@ -3240,31 +3306,60 @@ fun CowProfileScreen(
                 }
             }
 
-            // Activity Card
+            // Activity & Steps Tracking Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = MaterialTheme.shapes.medium,
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 border = CardDefaults.outlinedCardBorder()
             ) {
-                Row(
-                    modifier = Modifier
-                        .padding(spacing.md)
-                        .fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                Column(
+                    modifier = Modifier.padding(spacing.md),
+                    verticalArrangement = Arrangement.spacedBy(spacing.sm)
                 ) {
                     Row(
+                        modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(spacing.sm)
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Icon(Icons.Default.DirectionsWalk, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                        Column {
-                            Text("Latest Recorded Activity", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(spacing.sm)
+                        ) {
+                            Icon(Icons.Default.DirectionsWalk, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                             Text(
-                                text = cow.latestActivitySteps?.let { "$it steps" } ?: "No step data",
+                                text = "Activity & Step Tracking",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
+                            )
+                        }
+                        val hasSteps = cow.latestStepsToday != null || cow.latestStepsLifetime != null || cow.latestActivitySteps != null
+                        HealthStatusChip(
+                            status = if (hasSteps) "Active" else "Offline",
+                            statusType = if (hasSteps) HealthStatusType.HEALTHY else HealthStatusType.WARNING
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text("Today's Steps", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                text = (cow.latestStepsToday ?: cow.latestActivitySteps)?.let { "$it steps" } ?: "Not Available",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text("Total Steps", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                text = cow.latestStepsLifetime?.let { "$it steps" } ?: "Not Available",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.secondary
                             )
                         }
                     }

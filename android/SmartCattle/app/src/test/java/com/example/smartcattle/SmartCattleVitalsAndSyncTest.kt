@@ -823,4 +823,46 @@ class SmartCattleVitalsAndSyncTest {
         assertEquals(25, stepsToday)
         assertEquals(5037, totalSteps)
     }
+
+    // ── Test 24: Steps and Total Steps are present in 9-card sensor list and Cattle domain model ──
+    @Test
+    fun testStepsAndTotalStepsPresentInSensorListAndCattleModel() {
+        val cid = "CATTLE-001"
+        val sensors = listOf(
+            Sensor("hr", "Heart Rate", "72", "bpm", "Normal", androidx.compose.ui.graphics.Color.Green),
+            Sensor("spo2", "SpO2", "98", "%", "Normal", androidx.compose.ui.graphics.Color.Green),
+            Sensor("temp", "Body Temp", "38.5", "°C", "Normal", androidx.compose.ui.graphics.Color.Green),
+            Sensor("ph", "pH Level", "6.8", "", "Normal", androidx.compose.ui.graphics.Color.Green),
+            Sensor("ldr", "Light", "450", "lux", "Normal", androidx.compose.ui.graphics.Color.Green),
+            Sensor("weight", "Weight", "450.0", "kg", "Stable", androidx.compose.ui.graphics.Color.Green),
+            Sensor("steps", "Steps", "1420", "steps", "Active", androidx.compose.ui.graphics.Color.Green),
+            Sensor("total_steps", "Total Steps", "12500", "steps", "Tracking", androidx.compose.ui.graphics.Color.Green),
+            Sensor("mems", "MEMS Accelerometer", "X:0.1 Y:0.2 Z:9.8", "m/s²", "Normal", androidx.compose.ui.graphics.Color.Green)
+        )
+        val cattle = Cattle(
+            id = cid,
+            name = "Bessie",
+            breed = "Holstein",
+            age = "4 years",
+            overall = "Healthy",
+            sensors = sensors,
+            stepsToday = 1420,
+            stepsLifetime = 12500
+        )
+
+        assertEquals("Sensor list must have exactly 9 sensors", 9, cattle.sensors.size)
+        val stepsSensor = cattle.sensors.find { it.label.equals("Steps", ignoreCase = true) }
+        val totalStepsSensor = cattle.sensors.find { it.label.equals("Total Steps", ignoreCase = true) }
+
+        assertNotNull("Steps sensor card must be present", stepsSensor)
+        assertEquals("1420", stepsSensor!!.value)
+        assertEquals("Active", stepsSensor.status)
+
+        assertNotNull("Total Steps sensor card must be present", totalStepsSensor)
+        assertEquals("12500", totalStepsSensor!!.value)
+        assertEquals("Tracking", totalStepsSensor.status)
+
+        assertEquals(1420, cattle.stepsToday)
+        assertEquals(12500, cattle.stepsLifetime)
+    }
 }

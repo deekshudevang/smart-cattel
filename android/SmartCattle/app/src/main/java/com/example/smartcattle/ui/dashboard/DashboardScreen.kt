@@ -290,7 +290,7 @@ fun DashboardScreen(viewModel: CattleViewModel) {
             Box(Modifier.weight(1f)) {
                 SensorGridCard(
                     icon = Icons.Default.Timeline,
-                    label = "Total steps",
+                    label = "Total Steps",
                     value = totalStepsVal,
                     unit = if (totalStepsVal == "Not Available" || totalStepsVal == "Offline") "" else "steps",
                     status = totalStepsStatus
