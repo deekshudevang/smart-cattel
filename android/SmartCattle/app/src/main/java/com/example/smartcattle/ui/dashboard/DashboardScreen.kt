@@ -157,14 +157,14 @@ fun DashboardScreen(viewModel: CattleViewModel) {
         }
 
         Text(
-            text = "Live telemetry (7 categories)",
+            text = "Live telemetry (9 categories)",
             color = TextSecondary,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium
         )
 
         // ══════════════════════════════════════════════════════════
-        // EXACT DASHBOARD LAYOUT: STRICT 7 SENSOR CARDS
+        // EXACT DASHBOARD LAYOUT: STRICT 9 SENSOR CARDS
         // ══════════════════════════════════════════════════════════
 
         // ── ROW 1: Heart Rate | SpO2 ──
@@ -268,7 +268,37 @@ fun DashboardScreen(viewModel: CattleViewModel) {
             }
         }
 
-        // ── ROW 4: MEMS Axis — ONE full-width card with X-Axis | Y-Axis | Z-Axis ──
+        // ── ROW 4: Steps | Total Steps ──
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            val stepsTodayVal = if (!connected) "Offline" else if (d.stepCountToday == null) "Not Available" else "${d.stepCountToday}"
+            val stepsTodayStatus = if (!connected) "Offline" else if (data == null) "Stale" else if (d.stepCountToday == null) "Offline" else "Active"
+            Box(Modifier.weight(1f)) {
+                SensorGridCard(
+                    icon = Icons.Default.DirectionsWalk,
+                    label = "Steps",
+                    value = stepsTodayVal,
+                    unit = if (stepsTodayVal == "Not Available" || stepsTodayVal == "Offline") "" else "steps",
+                    status = stepsTodayStatus
+                )
+            }
+
+            val totalStepsVal = if (!connected) "Offline" else if (d.stepCountLifetime == null) "Not Available" else "${d.stepCountLifetime}"
+            val totalStepsStatus = if (!connected) "Offline" else if (data == null) "Stale" else if (d.stepCountLifetime == null) "Offline" else "Tracking"
+            Box(Modifier.weight(1f)) {
+                SensorGridCard(
+                    icon = Icons.Default.Timeline,
+                    label = "Total steps",
+                    value = totalStepsVal,
+                    unit = if (totalStepsVal == "Not Available" || totalStepsVal == "Offline") "" else "steps",
+                    status = totalStepsStatus
+                )
+            }
+        }
+
+        // ── ROW 5: MEMS Axis — ONE full-width card with X-Axis | Y-Axis | Z-Axis ──
         MemsFullWidthCard(
             x = d.accelerationX ?: d.memsX,
             y = d.accelerationY ?: d.memsY,

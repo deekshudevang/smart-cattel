@@ -154,6 +154,50 @@ data class AlertRow(
     val details: List<String>
 )
 
+
+// ── Step Specific Domain Models ──
+
+data class StepReading(
+    val id: Int = 0,
+    val cattle_id: String = "",
+    val device_id: String? = null,
+    val steps_today: Int = 0,
+    val total_steps: Int = 0,
+    val step_increment: Int = 0,
+    val step_sensor_status: String = "active",
+    val step_algorithm_version: String = "1.0",
+    val measured_at: String = "",
+    val created_at: String = "",
+    val is_simulated: Boolean = false
+) {
+    val cattleId: String get() = cattle_id
+    val stepsToday: Int get() = steps_today
+    val totalSteps: Int get() = total_steps
+    val stepIncrement: Int get() = step_increment
+    val sensorStatus: String get() = step_sensor_status
+    val measuredAt: String get() = measured_at
+}
+
+data class StepStatistics(
+    val cattle_id: String = "",
+    val steps_today: Int = 0,
+    val total_steps: Int = 0,
+    val daily_average: Float = 0f,
+    val hourly_average: Float = 0f,
+    val peak_hour: Int? = null,
+    val activity_status: String = "normal",
+    val step_sensor_status: String = "active",
+    val last_updated: String? = null
+) {
+    val cattleId: String get() = cattle_id
+    val stepsToday: Int get() = steps_today
+    val totalSteps: Int get() = total_steps
+    val dailyAverage: Float get() = daily_average
+    val hourlyAverage: Float get() = hourly_average
+    val activityStatus: String get() = activity_status
+    val lastUpdated: String? get() = last_updated
+}
+
 // ── Weight Specific Domain Models ──
 
 data class WeightReading(

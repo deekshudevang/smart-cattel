@@ -1021,6 +1021,15 @@ class CattleViewModel : ViewModel() {
                             } else "Not Available"
                             val accelReason = resolveReason("accelerometer", rawAccelX, accelValid, "Sensor not connected")
 
+                            val stepsTodayReason = resolveReason("steps", effectiveStepsToday, accelValid, "Sensor not connected")
+                            val stepsTodayStatus = if (stepsTodayVal == "Not Available") "Offline" else "Active"
+                            val stepsTodayColor = if (stepsTodayVal == "Not Available") Grey else Green
+
+                            val totalStepsVal = if (effectiveStepsLifetime != null && accelValid) "$effectiveStepsLifetime" else "Not Available"
+                            val totalStepsReason = resolveReason("total_steps", effectiveStepsLifetime, accelValid, "Sensor not connected")
+                            val totalStepsStatus = if (totalStepsVal == "Not Available") "Offline" else "Tracking"
+                            val totalStepsColor = if (totalStepsVal == "Not Available") Grey else Green
+
                             val sensors = listOf(
                                 Sensor("hr", "Heart Rate", hrVal, "bpm", sStatus("heart_rate"), sColor("heart_rate"), isValid = hrVal != "Not Available", reason = hrReason),
                                 Sensor("spo2", "SpO2", spo2Val, "%", sStatus("spo2"), sColor("spo2"), isValid = spo2Val != "Not Available", reason = spo2Reason),
@@ -1028,6 +1037,8 @@ class CattleViewModel : ViewModel() {
                                 Sensor("ph", "pH Level", phVal, "", sStatus("ph"), sColor("ph"), isValid = phVal != "Not Available", reason = phReason),
                                 Sensor("ldr", "Light", ldrVal, "lux", sStatus("ldr"), sColor("ldr"), isValid = ldrVal != "Not Available", reason = ldrReason),
                                 Sensor("weight", "Weight", weightVal, "kg", weightStatus, weightColor, isValid = weightVal != "Not Available", reason = weightReason),
+                                Sensor("steps", "Steps", stepsTodayVal, "steps", stepsTodayStatus, stepsTodayColor, isValid = stepsTodayVal != "Not Available", reason = stepsTodayReason),
+                                Sensor("total_steps", "Total Steps", totalStepsVal, "steps", totalStepsStatus, totalStepsColor, isValid = totalStepsVal != "Not Available", reason = totalStepsReason),
                                 Sensor("mems", "MEMS Accelerometer", accelStr, "m/s²", memsStatus, memsColor, isValid = accelStr != "Not Available", reason = accelReason)
                             )
                             val overall = if (overallStatus == "abnormal") "At Risk" else "Healthy"
@@ -1912,17 +1923,20 @@ fun CattleTelemetrySection(cattle: Cattle, onOpenWeight: (String) -> Unit = {}) 
                 icon = Icons.Default.Sensors
             )
 
-            // EXACT 7 SENSOR CARDS LAYOUT:
+            // EXACT 9 SENSOR CARDS LAYOUT:
             // ROW 1: Heart Rate | SpO2
             // ROW 2: Temperature | pH
             // ROW 3: Light (LDR) | Weight (HX711)
-            // ROW 4: MEMS Accelerometer — One full-width card with X, Y, Z together
+            // ROW 4: Steps | Total Steps
+            // ROW 5: MEMS Accelerometer — One full-width card with X, Y, Z together
             val hrSensor = cattle.sensors.find { it.label.equals("Heart Rate", ignoreCase = true) }
             val spo2Sensor = cattle.sensors.find { it.label.equals("SpO2", ignoreCase = true) }
             val tempSensor = cattle.sensors.find { it.label.contains("Temp", ignoreCase = true) }
             val phSensor = cattle.sensors.find { it.label.contains("pH", ignoreCase = true) }
             val ldrSensor = cattle.sensors.find { it.label.contains("Light", ignoreCase = true) || it.label.contains("LDR", ignoreCase = true) }
             val weightSensor = cattle.sensors.find { it.label.equals("Weight", ignoreCase = true) }
+            val stepsSensor = cattle.sensors.find { it.label.equals("Steps", ignoreCase = true) }
+            val totalStepsSensor = cattle.sensors.find { it.label.equals("Total Steps", ignoreCase = true) }
 
             Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
                 // ROW 1: Heart Rate | SpO2
@@ -2032,7 +2046,42 @@ fun CattleTelemetrySection(cattle: Cattle, onOpenWeight: (String) -> Unit = {}) 
                     }
                 }
 
-                // ROW 4: MEMS Accelerometer — ONE full-width combined card with X-Axis | Y-Axis | Z-Axis
+                // ROW 4: Steps | Total Steps
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(spacing.sm)
+                ) {
+                    Box(modifier = Modifier.weight(1f)) {
+                        val s = stepsSensor
+                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        MetricCard(
+                            label = "Steps",
+                            value = valStr,
+                            unit = if (valStr == "Not Available") "" else "steps",
+                            icon = Icons.Default.DirectionsWalk,
+                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: "Active",
+                            statusColor = if (cattle.isStale) Grey else s?.color ?: Green,
+                            isValid = (s?.isValid == true) && valStr != "Not Available" && !cattle.isStale,
+                            subtitle = if (cattle.isStale) "Disconnected" else s?.reason ?: "Today's steps"
+                        )
+                    }
+                    Box(modifier = Modifier.weight(1f)) {
+                        val s = totalStepsSensor
+                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        MetricCard(
+                            label = "Total Steps",
+                            value = valStr,
+                            unit = if (valStr == "Not Available") "" else "steps",
+                            icon = Icons.Default.Timeline,
+                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: "Tracking",
+                            statusColor = if (cattle.isStale) Grey else s?.color ?: Green,
+                            isValid = (s?.isValid == true) && valStr != "Not Available" && !cattle.isStale,
+                            subtitle = if (cattle.isStale) "Disconnected" else s?.reason ?: "Cumulative"
+                        )
+                    }
+                }
+
+                // ROW 5: MEMS Accelerometer — ONE full-width combined card with X-Axis | Y-Axis | Z-Axis
                 MemsDashboardCard(
                     x = cattle.memsX,
                     y = cattle.memsY,

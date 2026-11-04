@@ -27,7 +27,7 @@ from services import SensorService, PredictionService
 from schemas.websocket import WebSocketEvent
 import redis.asyncio as redis_async
 from auth import get_current_user, require_admin
-from routers import analytics, calibration, cattle, devices, weight
+from routers import analytics, calibration, cattle, devices, weight, steps
 from app.serial.manager import SerialManager
 
 serial_manager = SerialManager()
@@ -52,6 +52,7 @@ app.include_router(calibration.router)
 app.include_router(cattle.router)
 app.include_router(devices.router)
 app.include_router(weight.router)
+app.include_router(steps.router)
 
 # CORS
 app.add_middleware(

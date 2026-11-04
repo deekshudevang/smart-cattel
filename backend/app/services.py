@@ -220,6 +220,124 @@ class DatabaseService:
             }
         finally:
             db.close()
+    @staticmethod
+    def save_step_reading(
+        cattle_id: str,
+        steps_today: int,
+        total_steps: int,
+        step_increment: int = 0,
+        device_id: str = None,
+        step_sensor_status: str = "active",
+        step_algorithm_version: str = "1.0",
+        measured_at: datetime = None,
+        is_simulated: bool = False
+    ) -> models.CattleStepReading:
+        db = SessionLocal()
+        try:
+            if measured_at is None:
+                measured_at = datetime.now(timezone.utc)
+            reading = models.CattleStepReading(
+                cattle_id=cattle_id,
+                device_id=device_id,
+                steps_today=int(steps_today),
+                total_steps=int(total_steps),
+                step_increment=int(step_increment),
+                step_sensor_status=step_sensor_status,
+                step_algorithm_version=step_algorithm_version,
+                measured_at=measured_at,
+                is_simulated=is_simulated
+            )
+            db.add(reading)
+            db.commit()
+            db.refresh(reading)
+            return reading
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    @staticmethod
+    def get_latest_step_reading(cattle_id: str, include_simulated: bool = False):
+        db = SessionLocal()
+        try:
+            q = db.query(models.CattleStepReading).filter(
+                models.CattleStepReading.cattle_id == cattle_id
+            )
+            if not include_simulated:
+                q = q.filter(models.CattleStepReading.is_simulated == False)
+            return q.order_by(models.CattleStepReading.measured_at.desc()).first()
+        finally:
+            db.close()
+
+    @staticmethod
+    def get_step_history(cattle_id: str, limit: int = 50, include_simulated: bool = False):
+        db = SessionLocal()
+        try:
+            q = db.query(models.CattleStepReading).filter(
+                models.CattleStepReading.cattle_id == cattle_id
+            )
+            if not include_simulated:
+                q = q.filter(models.CattleStepReading.is_simulated == False)
+            return q.order_by(models.CattleStepReading.measured_at.desc()).limit(limit).all()
+        finally:
+            db.close()
+
+    @staticmethod
+    def get_step_statistics(cattle_id: str, include_simulated: bool = False):
+        db = SessionLocal()
+        try:
+            now = datetime.now(timezone.utc)
+            q = db.query(models.CattleStepReading).filter(
+                models.CattleStepReading.cattle_id == cattle_id
+            )
+            if not include_simulated:
+                q = q.filter(models.CattleStepReading.is_simulated == False)
+            readings = q.order_by(models.CattleStepReading.measured_at.desc()).limit(200).all()
+
+            if not readings:
+                latest_sr = db.query(models.SensorReading).filter(
+                    models.SensorReading.cattle_id == cattle_id
+                ).order_by(models.SensorReading.timestamp.desc()).first()
+                steps_today = (latest_sr.step_count_today or 0) if latest_sr else 0
+                total_steps = (latest_sr.step_count_lifetime or 0) if latest_sr else 0
+                return {
+                    "cattle_id": cattle_id,
+                    "steps_today": steps_today,
+                    "total_steps": total_steps,
+                    "daily_average": float(steps_today),
+                    "hourly_average": round(steps_today / 24.0, 1),
+                    "peak_hour": None,
+                    "activity_status": "resting" if steps_today < 100 else "normal",
+                    "step_sensor_status": "active" if latest_sr else "offline",
+                    "last_updated": latest_sr.timestamp if latest_sr else None
+                }
+
+            latest = readings[0]
+            steps_today = latest.steps_today
+            total_steps = latest.total_steps
+
+            increments_7d = [r.step_increment for r in readings if (now - (r.measured_at if r.measured_at.tzinfo else r.measured_at.replace(tzinfo=timezone.utc))).days <= 7]
+            sum_7d = sum(increments_7d)
+            daily_avg = round(sum_7d / 7.0, 1) if sum_7d > 0 else float(steps_today)
+
+            hourly_avg = round(steps_today / 24.0, 1)
+            activity_status = "high" if steps_today > 3000 else ("active" if steps_today > 1000 else ("normal" if steps_today > 200 else "resting"))
+
+            return {
+                "cattle_id": cattle_id,
+                "steps_today": steps_today,
+                "total_steps": total_steps,
+                "daily_average": daily_avg,
+                "hourly_average": hourly_avg,
+                "peak_hour": latest.measured_at.hour if latest.measured_at else None,
+                "activity_status": activity_status,
+                "step_sensor_status": latest.step_sensor_status,
+                "last_updated": latest.measured_at
+            }
+        finally:
+            db.close()
+
 
 
 class AlertService:
@@ -496,6 +614,40 @@ class SensorService:
                     steps=int(auth_today)
                 )
                 _db.add(new_act)
+
+            # Persist steps to cattle_step_readings table
+            if accel_valid and incoming_lifetime is not None:
+                last_step = _db.query(models.CattleStepReading).filter(
+                    models.CattleStepReading.cattle_id == cattle_id
+                ).order_by(models.CattleStepReading.measured_at.desc()).first()
+
+                prev_tot = last_step.total_steps if last_step else 0
+                step_inc = max(0, auth_life - prev_tot)
+
+                now_utc = datetime.now(timezone.utc)
+                should_save_step = False
+                if not last_step:
+                    should_save_step = True
+                elif step_inc > 0:
+                    should_save_step = True
+                else:
+                    m_time = last_step.measured_at if last_step.measured_at.tzinfo else last_step.measured_at.replace(tzinfo=timezone.utc)
+                    if (now_utc - m_time).total_seconds() >= 60:
+                        should_save_step = True
+
+                if should_save_step:
+                    new_step_rec = models.CattleStepReading(
+                        cattle_id=cattle_id,
+                        device_id=validated_data.get("device_id"),
+                        steps_today=int(auth_today),
+                        total_steps=int(auth_life),
+                        step_increment=step_inc,
+                        step_sensor_status="active",
+                        step_algorithm_version="1.0",
+                        measured_at=now_utc,
+                        is_simulated=validated_data.get("is_simulated", False)
+                    )
+                    _db.add(new_step_rec)
 
             # Persist confirmed weight to Cattle profile and CattleWeightReading table
             w_valid = validated_data.get("weight_valid", False)

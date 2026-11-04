@@ -5,6 +5,8 @@ import com.example.smartcattle.data.model.formatAlertDateTime
 import com.example.smartcattle.data.model.HealthStatus
 import com.example.smartcattle.data.model.HistoryRow
 import com.example.smartcattle.data.model.SensorData
+import com.example.smartcattle.data.model.StepReading
+import com.example.smartcattle.data.model.StepStatistics
 import com.example.smartcattle.data.model.WeightReading
 import com.example.smartcattle.data.model.WeightStatistics
 import com.example.smartcattle.data.model.WeightRecordRequest
@@ -198,6 +200,20 @@ interface CattleApi {
 
     @DELETE("/api/cows/{id}")
     suspend fun deleteCow(@Path("id") id: String): Response<Unit>
+
+
+    // ── Steps API Endpoints ──
+    @GET("/api/v1/cattle/{id}/steps/latest")
+    suspend fun getLatestSteps(@Path("id") id: String): StepReading
+
+    @GET("/api/v1/cattle/{id}/steps/history")
+    suspend fun getStepsHistory(
+        @Path("id") id: String,
+        @Query("limit") limit: Int = 50
+    ): List<StepReading>
+
+    @GET("/api/v1/cattle/{id}/steps/statistics")
+    suspend fun getStepStatistics(@Path("id") id: String): StepStatistics
 
     // ── Weight API Endpoints ──
     @GET("/api/v1/cattle/{id}/weight/latest")

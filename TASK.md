@@ -1,9 +1,53 @@
 | **ADXL345 Physical Tilt/Shake Test** | Requires human operator to physically move board | - | - | **UNVERIFIED (Requires user physical motion)** |
 | **On-Phone Live Display** | Phone currently unplugged from PC USB | - | - | **UNVERIFIED on physical screen (APK ready & verified in unit tests)** |
+| **Cattle Step-Counting Accuracy** | Requires actual cattle movement or controlled physical shake test | - | - | **UNVERIFIED (Awaiting physical cattle movement data)** |
 
 ---
 
-### PHASE 21 — Automatic Disconnection Diagnosis & Resilient Reconnection
+### PHASE 21 — Cattle Activity and Step Counting
+- **Objective**: Integrate cattle step counting and cumulative activity tracking into the Smart Cattle Monitoring System using the existing ADXL345 MEMS accelerometer, persisting daily and lifetime counts across restarts and displaying exactly nine sensor categories on the dashboard.
+- **Tasks**:
+  - **Accelerometer Algorithm**:
+    - Real-time 3D acceleration magnitude calculation: $\text{magnitude} = \sqrt{a_x^2 + a_y^2 + a_z^2}$.
+    - Continuous dynamic gravity extraction via exponential moving average ($\alpha = 0.05$) to handle arbitrary collar/tag orientations without false triggers.
+    - Bovine stride hysteresis peak detection: upper threshold $1.8\,\text{m/s}^2$, lower re-arming threshold $0.5\,\text{m/s}^2$.
+    - 380ms refractory period lockout preventing double-counting within a single gait cycle.
+    - Baseline noise floor suppression at $0.35\,\text{m/s}^2$ to avoid counting random breathing or ambient vibration.
+  - **Firmware & EEPROM Wear-Leveling**:
+    - Wear-leveled persistent lifetime counter in EEPROM (`EEPROM_STEP_ADDR = 16`, magic `0x5354`) with 10-second commit throttling to preserve EEPROM write endurance.
+    - Boot counter tracking on microcontroller initialization for anomaly and power-interruption reconciliation.
+    - Emitted `step_count_today` and `step_count_lifetime` in standard serial JSON telemetry.
+  - **Authoritative Backend Processing**:
+    - Single authoritative step management (`AuthoritativeStepManager`) in configured farm timezone (`settings.TIMEZONE = "Asia/Kolkata"`).
+    - Midnight daily rollover resets `steps_today` to 0 while strictly preserving cumulative `total_steps`.
+    - Anomaly protection: clamps implausible jumps (>5,000 steps/packet) and handles unexpected counter decreases without double-counting.
+    - Gated by `accelerometer_valid`: disconnected or invalid accelerometer signals never fabricate bogus step counts.
+  - **Database Persistence**:
+    - Created `cattle_step_readings` table (model `CattleStepReading`) with fields `id`, `cattle_id`, `device_id`, `steps_today`, `total_steps`, `step_increment`, `step_sensor_status`, `step_algorithm_version`, `measured_at`, `created_at`, `is_simulated`.
+    - Added foreign keys and indexes (`idx_step_cattle_measured`, `idx_step_is_simulated`).
+    - Persisted genuine step increments and periodic 60s heartbeats to `cattle_step_readings`.
+  - **API Integration**:
+    - `GET /api/v1/cattle/{cattle_id}/steps/latest` (and `/api/cattle/{cattle_id}/steps/latest`): returns latest verified step reading.
+    - `GET /api/v1/cattle/{cattle_id}/steps/history`: returns chronological step records with `limit` query param.
+    - `GET /api/v1/cattle/{cattle_id}/steps/statistics`: returns today's steps, total lifetime steps, 7-day daily average, hourly average, activity status, and sensor status.
+  - **Android UI Integration (Exactly Nine Dashboard Cards)**:
+    - Updated dashboard layout to exactly 9 sensor cards across 5 rows:
+      - ROW 1: Heart Rate | SpO2
+      - ROW 2: Temperature | pH
+      - ROW 3: Light (LDR) | Weight (HX711)
+      - ROW 4: Steps | Total Steps
+      - ROW 5: MEMS Accelerometer — ONE full-width card with X-Axis, Y-Axis, and Z-Axis together.
+    - Handled all states: Live, Disconnected, Stale, Not Available, Offline, with appropriate icons (`DirectionsWalk`, `Timeline`, `Sensors`).
+  - **Testing & Verification**:
+    - 5 backend regression tests in `backend/tests/test_steps_endpoints.py` covering persistence, latest endpoint, history, statistics, midnight rollover, duplicate packet filtering, and sensor disconnection gating.
+    - Full backend test suite passing: **85 of 85 passed**.
+    - Android unit tests in `SmartCattleVitalsAndSyncTest.kt` passing: 23 of 23 passed, asserting exactly 9 dashboard sensor categories.
+    - Android debug APK assembled cleanly (`BUILD SUCCESSFUL`).
+- **Completion Status**: VERIFIED (Physical step accuracy marked UNVERIFIED pending live animal motion test)
+
+---
+
+### PHASE 22 — Automatic Disconnection Diagnosis & Resilient Reconnection
 - **Objective**: Diagnose and eliminate automatic data stream disconnections across firmware, backend serial reader, and WebSocket/Android pipeline without rewriting working code.
 - **Tasks**:
   - Inspect firmware for blocking calls, watchdog/brownout risks, serial TX buffer saturation, and add boot-reason diagnostics (`esp_reset_reason()` / AVR `MCUSR`).
@@ -35,7 +79,7 @@
 
 ---
 
-### PHASE 22 — Auto-Port Detection, Port Release Mechanism & Mega 2560 Power Budget
+### PHASE 23 — Auto-Port Detection, Port Release Mechanism & Mega 2560 Power Budget
 - **Objective**: Eliminate "cannot open port COM10" upload errors, auto-detect Arduino via USB VID/PID, add release-port mechanism for IDE flashing, protect Pins 0/1, and document power budget.
 - **Tasks**:
   - Auto-detect Arduino/Mega 2560 by USB VID/PID (`0x2341`, `0x1A86`, `0x10C4`, `0x0403`) and keywords via `list_ports`, with config/env override (`SERIAL_PORT="AUTO"`).

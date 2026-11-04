@@ -61,6 +61,7 @@ class Cattle(Base, BaseMixin):
     health_assessments = relationship("HealthAssessment", back_populates="cattle")
     device_assignments = relationship("DeviceAssignment", back_populates="cattle")
     weight_readings = relationship("CattleWeightReading", back_populates="cattle", cascade="all, delete-orphan")
+    step_readings = relationship("CattleStepReading", back_populates="cattle", cascade="all, delete-orphan")
 
 class SensorReading(Base, BaseMixin):
     __tablename__ = "sensor_readings"
@@ -322,4 +323,24 @@ class CattleWeightReading(Base, BaseMixin):
         Index('idx_weight_is_simulated', 'is_simulated'),
     )
 
+class CattleStepReading(Base, BaseMixin):
+    __tablename__ = "cattle_step_readings"
+    id = Column(Integer, primary_key=True, index=True)
+    cattle_id = Column(String, ForeignKey("cattle.cattle_id"), index=True, nullable=False)
+    device_id = Column(String, ForeignKey("devices.device_id"), index=True, nullable=True)
+    steps_today = Column(Integer, nullable=False, default=0)
+    total_steps = Column(Integer, nullable=False, default=0)
+    step_increment = Column(Integer, nullable=False, default=0)
+    step_sensor_status = Column(String, nullable=False, default="active")
+    step_algorithm_version = Column(String, nullable=False, default="1.0")
+    measured_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    is_simulated = Column(Boolean, default=False, index=True)
+
+    cattle = relationship("Cattle", back_populates="step_readings")
+
+    __table_args__ = (
+        Index('idx_step_cattle_measured', 'cattle_id', 'measured_at'),
+        Index('idx_step_is_simulated', 'is_simulated'),
+    )
 
