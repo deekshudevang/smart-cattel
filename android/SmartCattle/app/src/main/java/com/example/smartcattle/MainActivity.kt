@@ -144,12 +144,12 @@ data class Alert(val cattle: String, val msg: String, val time: String, val tag:
 data class CowProfile(
     val cattleId: String,
     val name: String,
-    val breed: String?,
-    val age: String?,
-    val gender: String?,
-    val dob: String?,
-    val notes: String?,
-    val status: String?,
+    val breed: String? = null,
+    val age: String? = null,
+    val gender: String? = null,
+    val dob: String? = null,
+    val notes: String? = null,
+    val status: String? = null,
     // latest sensor summary
     val latestSpo2: Int? = null,
     val latestHeartRate: Int? = null,
@@ -399,7 +399,10 @@ class CattleViewModel : ViewModel() {
     val isWeightActionLoading: StateFlow<Boolean> = _isWeightActionLoading.asStateFlow()
 
 
-    private var currentIp: String = BuildConfig.DEV_LAN_IP
+    var currentIp: String = BuildConfig.DEV_LAN_IP
+        private set
+    var currentPort: String = "8000"
+        private set
     private val deletedCattleIds = mutableSetOf<String>()
     private var cowDao: com.example.smartcattle.data.local.CowDao? = null
 
@@ -495,6 +498,40 @@ class CattleViewModel : ViewModel() {
                             stepsLifetime = p.latestStepsLifetime
                         )
                     }
+                } else if (_cowProfiles.value.isEmpty() && _cattle.value.isEmpty()) {
+                    val defaultProfile = CowProfile(
+                        cattleId = "CATTLE-001",
+                        name = "CATTLE-001",
+                        overallStatus = "Healthy"
+                    )
+                    _cowProfiles.value = listOf(defaultProfile)
+                    _cattle.value = listOf(
+                        Cattle(
+                            id = "CATTLE-001",
+                            name = "CATTLE-001",
+                            breed = "Not Available",
+                            age = "Not Available",
+                            overall = "Healthy",
+                            sensors = listOf(
+                                Sensor("hr", "Heart Rate", "Not Available", "bpm", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("spo2", "SpO2", "Not Available", "%", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("temp", "Body Temp", "Not Available", "°C", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("ph", "pH Level", "Not Available", "", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("ldr", "Light", "Not Available", "lux", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("weight", "Weight", "Not Available", "kg", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("steps", "Steps", "Not Available", "steps", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("total_steps", "Total Steps", "Not Available", "steps", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("mems", "MEMS Accelerometer", "Not Available", "m/s²", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream")
+                            ),
+                            dataSource = "Connecting...",
+                            isSimulated = false,
+                            isStale = true,
+                            lastUpdateFormatted = "Awaiting stream",
+                            fallDetected = false,
+                            weightStable = false,
+                            weightCalibrated = false
+                        )
+                    )
                 }
             } catch (e: Exception) {
                 android.util.Log.e("SmartCattle", "Failed to load cached cows: ${e.message}")
@@ -502,10 +539,11 @@ class CattleViewModel : ViewModel() {
         }
     }
 
-    fun configureIp(ip: String) {
+    fun configureIp(ip: String, port: String = "8000") {
         currentIp = ip
-        val baseUrl = "http://$ip:8000/"
-        val wsUrl = "ws://$ip:8000/ws/cattle/CATTLE-ALL"
+        currentPort = port
+        val baseUrl = "http://$ip:$port/"
+        val wsUrl = "ws://$ip:$port/ws/cattle/CATTLE-ALL"
 
         try {
             api = Retrofit.Builder()
@@ -534,16 +572,32 @@ class CattleViewModel : ViewModel() {
                     val validIds = if (activeProfiles.isNotEmpty()) activeProfiles.map { it.cattleId }.toSet() else apiCattleList.map { it.cattle_id }.filter { !deletedCattleIds.contains(it) }.toSet()
                     val uiCattleList = apiCattleList
                         .filter { it.cattle_id in validIds && !deletedCattleIds.contains(it.cattle_id) }
-                        .map { Cattle(it.cattle_id, it.name, "Not Available", "Not Available", it.status, emptyList()) }
-                    _cattle.value = uiCattleList
+                        .map {
+                            Cattle(
+                                it.cattle_id, it.name, "Not Available", "Not Available", it.status,
+                                listOf(
+                                    Sensor("hr", "Heart Rate", "Not Available", "bpm", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                    Sensor("spo2", "SpO2", "Not Available", "%", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                    Sensor("temp", "Body Temp", "Not Available", "°C", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                    Sensor("ph", "pH Level", "Not Available", "", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                    Sensor("ldr", "Light", "Not Available", "lux", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                    Sensor("weight", "Weight", "Not Available", "kg", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                    Sensor("steps", "Steps", "Not Available", "steps", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                    Sensor("total_steps", "Total Steps", "Not Available", "steps", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                    Sensor("mems", "MEMS Accelerometer", "Not Available", "m/s²", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream")
+                                )
+                            )
+                        }
 
-                    val populated = uiCattleList.map { c ->
-                        try {
-                            val r = api?.getLatestReading(c.id)
-                            if (r != null) buildCattleFromLatest(r, c.name) else c
-                        } catch (e: Exception) { c }
+                    if (uiCattleList.isNotEmpty()) {
+                        val populated = uiCattleList.map { c ->
+                            try {
+                                val r = api?.getLatestReading(c.id)
+                                if (r != null) buildCattleFromLatest(r, c.name) else c
+                            } catch (e: Exception) { c }
+                        }
+                        _cattle.value = populated
                     }
-                    _cattle.value = populated
 
                     if (apiCattleList.isNotEmpty()) {
                         fetchHistory(apiCattleList[0].cattle_id)
@@ -551,7 +605,7 @@ class CattleViewModel : ViewModel() {
                     fetchAlerts()
                     fetchCows()
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    android.util.Log.e("SmartCattle", "Failed to fetch telemetry from backend: ${e.message}", e)
                 }
             }
         } catch (e: Exception) {
@@ -560,7 +614,7 @@ class CattleViewModel : ViewModel() {
     }
 
     fun retryConnection() {
-        configureIp(currentIp)
+        configureIp(currentIp, currentPort)
     }
 
     // ── Cows CRUD ──
@@ -1250,8 +1304,8 @@ fun SmartCattleApp() {
         viewModel.initLocalCache(context)
     }
 
-    LaunchedEffect(ipAddress) {
-        viewModel.configureIp(ipAddress)
+    LaunchedEffect(ipAddress, port) {
+        viewModel.configureIp(ipAddress, port)
     }
 
     SmartCattleTheme(
@@ -1297,7 +1351,7 @@ fun SmartCattleApp() {
                         .putBoolean("dynamic_color", newDynamic)
                         .apply()
 
-                    viewModel.configureIp(newIp)
+                    viewModel.configureIp(newIp, newPort)
                     showSettingsDialog = false
                 }
             )
@@ -1669,7 +1723,7 @@ fun DashboardTab(
         // Uplink connection status banner
         ConnectionBanner(
             isConnected = isConnected,
-            serverUrl = "ws://backend:8000/ws/cattle/CATTLE-ALL",
+            serverUrl = "ws://${viewModel.currentIp}:${viewModel.currentPort}/ws/cattle/CATTLE-ALL",
             lastUpdateText = lastUpdate,
             onConfigureClick = onOpenSettings,
             onRetryClick = { viewModel.retryConnection() }

@@ -15,7 +15,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
-        buildConfigField("String", "DEV_LAN_IP", "\"192.168.1.3\"")
+        buildConfigField("String", "DEV_LAN_IP", "\"192.168.1.5\"")
     }
 
     buildFeatures {

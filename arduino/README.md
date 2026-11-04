@@ -40,3 +40,4 @@ Open the Arduino IDE on your laptop, navigate to **Sketch → Include Library �
    - Select **Tools → Port → COM...** (your Arduino port).
 3. If the backend server (`START_BACKEND.bat`) is running, pause the serial reader or close other serial monitors so the COM port is not locked during upload.
 4. Click the **Upload** arrow (or press `Ctrl + U`).
+

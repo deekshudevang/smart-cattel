@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Production Network Security Configuration: Disallows cleartext HTTP traffic globally -->
-    <base-config cleartextTrafficPermitted="false">
+    <!-- Allow cleartext HTTP traffic for local LAN communication with FastAPI backend -->
+    <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
+            <certificates src="user" />
         </trust-anchors>
     </base-config>
 </network-security-config>
