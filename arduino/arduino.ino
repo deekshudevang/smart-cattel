@@ -4,6 +4,12 @@
 #include "filters.h"
 #include "step_counter.h"
 #include <MAX30105.h>
+#ifndef I2C_SPEED_FAST
+#define I2C_SPEED_FAST 400000
+#endif
+#ifndef I2C_SPEED_STANDARD
+#define I2C_SPEED_STANDARD 100000
+#endif
 #include <TinyGPS++.h>
 #include <LiquidCrystal.h>
 #include <SoftwareSerial.h>
@@ -433,6 +439,25 @@ void loop() {
       adxl_valid = true;
       accel.setRange(ADXL345_RANGE_2_G);
       Serial.println(F("[ADXL345] Reconnected at 0x1D"));
+    }
+  }
+
+  // ---------- MAX30102 Auto-Reconnection Probe ----------
+  static unsigned long last_max_probe = 0;
+  if (!max_valid && millis() - last_max_probe >= 5000) {
+    last_max_probe = millis();
+    if (particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+      byte ledBrightness = 60;
+      byte sampleAverage = 4;
+      byte ledMode = 2;
+      int sampleRate = 400;
+      int pulseWidth = 411;
+      int adcRange = 16384;
+      particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
+      particleSensor.setPulseAmplitudeRed(0x1F);
+      particleSensor.setPulseAmplitudeIR(0x1F);
+      max_valid = true;
+      Serial.println(F("[MAX30102] Auto-reconnected OK"));
     }
   }
 

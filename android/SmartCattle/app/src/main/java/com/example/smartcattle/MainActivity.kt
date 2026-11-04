@@ -2029,7 +2029,7 @@ fun CattleTelemetrySection(cattle: Cattle, onOpenWeight: (String) -> Unit = {}) 
                 ) {
                     Box(modifier = Modifier.weight(1f)) {
                         val s = hrSensor
-                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        val valStr = s?.value ?: "Not Available"
                         MetricCard(
                             label = "Heart Rate",
                             value = valStr,
@@ -2043,7 +2043,7 @@ fun CattleTelemetrySection(cattle: Cattle, onOpenWeight: (String) -> Unit = {}) 
                     }
                     Box(modifier = Modifier.weight(1f)) {
                         val s = spo2Sensor
-                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        val valStr = s?.value ?: "Not Available"
                         MetricCard(
                             label = "SpO2",
                             value = valStr,
@@ -2064,7 +2064,7 @@ fun CattleTelemetrySection(cattle: Cattle, onOpenWeight: (String) -> Unit = {}) 
                 ) {
                     Box(modifier = Modifier.weight(1f)) {
                         val s = tempSensor
-                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        val valStr = s?.value ?: "Not Available"
                         MetricCard(
                             label = "Temperature",
                             value = valStr,
@@ -2078,7 +2078,7 @@ fun CattleTelemetrySection(cattle: Cattle, onOpenWeight: (String) -> Unit = {}) 
                     }
                     Box(modifier = Modifier.weight(1f)) {
                         val s = phSensor
-                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        val valStr = s?.value ?: "Not Available"
                         MetricCard(
                             label = "pH Level",
                             value = valStr,
@@ -2099,7 +2099,7 @@ fun CattleTelemetrySection(cattle: Cattle, onOpenWeight: (String) -> Unit = {}) 
                 ) {
                     Box(modifier = Modifier.weight(1f)) {
                         val s = ldrSensor
-                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        val valStr = s?.value ?: "Not Available"
                         MetricCard(
                             label = "Light (LDR)",
                             value = valStr,
@@ -2113,7 +2113,7 @@ fun CattleTelemetrySection(cattle: Cattle, onOpenWeight: (String) -> Unit = {}) 
                     }
                     Box(modifier = Modifier.weight(1f)) {
                         val s = weightSensor
-                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        val valStr = s?.value ?: "Not Available"
                         val weightSubtitle = if (cattle.isStale) "Disconnected" else if (cattle.weightStable) "Stable • Tap for scale" else "Stabilizing... • Tap for scale"
                         MetricCard(
                             label = "Weight (HX711)",
@@ -2319,7 +2319,7 @@ private fun MemsAxisColumn(label: String, value: Float?, isValid: Boolean) {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(Modifier.height(2.dp))
-        val displayVal = if (!isValid || value == null) "Not Available" else String.format(Locale.US, "%.2f", value)
+        val displayVal = if (value == null) "Not Available" else String.format(Locale.US, "%.2f", value)
         Text(
             text = displayVal,
             style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),

@@ -102,3 +102,32 @@
   - `pytest -v tests/test_serial_manager.py` -> **16 of 16 passed**.
   - `pytest -v tests` -> **79 of 79 passed**.
 - **Completion Status**: VERIFIED
+
+---
+
+### PHASE 24 — End-to-End Sensor Data Flow Debugging and Fix
+- **Objective**: Eliminate "Waiting for Arduino" on connected Android dashboard, fix cleartext network security block, prevent UI state from blanking valid readings, and stream telemetry from Arduino through FastAPI to Android.
+- **Root Cause Analysis**:
+  - **Cleartext HTTP Block**: `network_security_config.xml` had `cleartextTrafficPermitted="false"`, which blocked Retrofit from loading `/api/cattle` and `/api/cows` over local LAN HTTP.
+  - **Stale Overwrite in Jetpack Compose UI**: In `MainActivity.kt`, whenever `cattle.isStale` was true (>10s without packets or initial DB state), `valStr = if (cattle.isStale || s == null) "Not Available" else s.value` forcibly replaced genuine sensor readings with `"Not Available"`.
+  - **WebSocket Silent Connect**: `/ws/cattle/{cattle_id}` subscribed to telemetry but did not emit an initial state snapshot, leaving newly connected clients blank until the next serial packet arrived.
+- **Tasks & Fixes Implemented**:
+  - **Arduino Firmware (`arduino/arduino.ino`)**:
+    - Added `I2C_SPEED_FAST` (400kHz) and `I2C_SPEED_STANDARD` fallback macros to eliminate compilation scope errors across different Arduino IDE library setups.
+    - Added periodic non-blocking MAX30102 re-initialization probe in `loop()` (every 5s if `!max_valid`) so the pulse-oximeter auto-reconnects when re-seated without rebooting the board.
+  - **Android Network Security & Manifest**:
+    - Updated `network_security_config.xml` to allow cleartext LAN communication with the local FastAPI backend.
+    - Added `android:usesCleartextTraffic="true"` to `AndroidManifest.xml`.
+  - **FastAPI WebSocket Streaming (`backend/app/main.py`)**:
+    - Added immediate latest telemetry snapshot transmission upon client connection to `/ws/cattle/{cattle_id}` so dashboard cards populate immediately on open.
+  - **Jetpack Compose UI & ViewModel (`MainActivity.kt`)**:
+    - Replaced `val valStr = if (cattle.isStale || s == null) "Not Available" else s.value` with `val valStr = s?.value ?: "Not Available"` across all 9 sensor cards (Heart Rate, SpO2, Temperature, pH, LDR, Weight, Steps, Total Steps, MEMS).
+    - Preserved valid telemetry numbers on screen during offline/disconnected intervals with visual "Disconnected" / "Offline" status chips, strictly reserving "Not Available" for missing/uncontacted hardware.
+    - Updated `ConnectionBanner` to dynamically display the active server URL `ws://${viewModel.currentIp}:${viewModel.currentPort}/ws/cattle/CATTLE-ALL` instead of hardcoded `backend:8000`.
+    - Added port argument support to `configureIp(ip, port)`.
+  - **APK Distribution**:
+    - Built and verified `smart-cattle-update.apk` (16.5 MB) served via `/download` and `/app.apk`.
+- **Tests Executed**:
+  - Backend test suite: `pytest backend/tests -v` -> **85 of 85 passed**.
+  - Android application build: `gradlew assembleDebug` -> **BUILD SUCCESSFUL**.
+- **Completion Status**: VERIFIED

@@ -927,6 +927,82 @@ async def websocket_endpoint(websocket: WebSocket, cattle_id: str, client_id: st
     actual_client_id = client_id or f"client_{cattle_id}_{int(time.time())}"
     await manager.connect(websocket, actual_client_id, reconnect)
     manager.subscribe(actual_client_id, cattle_id)
+    
+    # Send immediate latest telemetry snapshot upon connection
+    try:
+        target_ids = ["CATTLE-001"] if cattle_id in ("CATTLE-ALL", "ALL", "*") else [cattle_id]
+        db = SessionLocal()
+        try:
+            for cid in target_ids:
+                reading = db.query(models.SensorReading).filter(
+                    models.SensorReading.cattle_id == cid,
+                    models.SensorReading.is_simulated == False
+                ).order_by(models.SensorReading.timestamp.desc()).first()
+                if reading:
+                    data = {
+                        "cattle_id": cid,
+                        "timestamp": reading.timestamp.isoformat() if reading.timestamp else "",
+                        "spo2": reading.spo2,
+                        "heart_rate": reading.heart_rate,
+                        "bpm": reading.heart_rate,
+                        "temperature": reading.temperature,
+                        "humidity": reading.humidity,
+                        "ph": reading.ph,
+                        "ldr": reading.ldr,
+                        "acceleration_x": reading.acceleration_x,
+                        "acceleration_y": reading.acceleration_y,
+                        "acceleration_z": reading.acceleration_z,
+                        "mems_x": reading.acceleration_x,
+                        "mems_y": reading.acceleration_y,
+                        "mems_z": reading.acceleration_z,
+                        "step_count_today": reading.step_count_today,
+                        "step_count_lifetime": reading.step_count_lifetime,
+                        "body_weight_kg": reading.body_weight_kg,
+                        "weight_raw": reading.weight_raw,
+                        "weight_stable": reading.weight_stable,
+                        "weight_calibrated": reading.weight_calibrated,
+                        "weight_sensor_status": reading.weight_sensor_status,
+                        "weight_valid": reading.weight_valid,
+                        "accelerometer_valid": reading.accelerometer_valid,
+                        "heart_rate_valid": reading.heart_rate_valid,
+                        "spo2_valid": reading.spo2_valid,
+                        "temperature_valid": reading.temperature_valid,
+                        "ph_valid": reading.ph_valid,
+                        "ldr_valid": reading.ldr_valid,
+                        "device_connected": True,
+                        "source": "serial",
+                        "is_simulated": False
+                    }
+                    health = {
+                        "spo2": "normal",
+                        "heart_rate": "normal",
+                        "temperature": "normal",
+                        "mems": "normal",
+                        "ph": "normal",
+                        "ldr": "normal",
+                        "overall": "normal",
+                        "fall_detected": reading.fall_detected or False
+                    }
+                    payload = {
+                        "type": "sensor_update",
+                        "cattle_id": cid,
+                        "data": data,
+                        "health": health,
+                        "validity": {},
+                        "validity_reasons": {},
+                        "source": "serial",
+                        "is_simulated": False
+                    }
+                    ws_event = manager.format_event(
+                        event_type="sensor_update",
+                        payload=payload,
+                        cattle_id=cid
+                    )
+                    await websocket.send_text(ws_event.model_dump_json())
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"Failed to send initial websocket telemetry snapshot: {e}")
     try:
         while True:
             data = await websocket.receive_text()
