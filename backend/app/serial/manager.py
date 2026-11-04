@@ -2,6 +2,7 @@ import serial
 import serial.tools.list_ports
 import time
 import json
+import os
 import threading
 import logging
 from datetime import datetime
@@ -18,6 +19,25 @@ class ConnectionState(str, Enum):
 
 logger = logging.getLogger(__name__)
 
+# Known USB-to-UART / Arduino Vendor IDs
+ARDUINO_VIDS = {
+    0x2341,  # Arduino SA (Official Mega 2560, Uno, etc.)
+    0x2A03,  # Arduino.org
+    0x1A86,  # QinHeng Electronics CH340 / CH341 (Arduino Mega clones)
+    0x10C4,  # Silicon Labs CP210x
+    0x0403,  # FTDI FT232R
+}
+
+# Known Arduino Product IDs
+ARDUINO_PIDS = {
+    0x0010,  # Mega 2560 R3
+    0x0042,  # Mega 2560 R3 (rev 2)
+    0x8042,  # Mega 2560 ADK
+    0x0043,  # Uno R3
+    0x7523,  # CH340 on Arduino clones
+    0x5523,  # CH341
+}
+
 class SerialManager:
     _instance = None
     _init_lock = threading.Lock()
@@ -30,12 +50,19 @@ class SerialManager:
                     cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self, fallback_port: str = "COM13", baudrate: int = 9600):
+    def __init__(self, fallback_port: Optional[str] = None, baudrate: int = 9600):
         if getattr(self, '_initialized', False):
             return
             
         self._initialized = True
-        self.fallback_port = fallback_port
+        # Allow override via config/env, default to AUTO if not specified
+        env_port = os.getenv("SERIAL_PORT")
+        configured_port = fallback_port or env_port or "AUTO"
+        self.fallback_port = configured_port
+        self.override_port: Optional[str] = None
+        if configured_port and configured_port.upper() not in ("AUTO", "NONE", ""):
+            self.override_port = configured_port
+
         self.baudrate = baudrate
         self.ser: Optional[serial.Serial] = None
         
@@ -75,21 +102,39 @@ class SerialManager:
         """Returns a list of available COM ports."""
         return [p.device for p in serial.tools.list_ports.comports()]
 
+    def set_override_port(self, port: Optional[str]):
+        """Dynamically set an override port (or None / AUTO to enable auto-detection)."""
+        if port and port.upper() not in ("AUTO", "NONE", ""):
+            self.override_port = port
+            self.fallback_port = port
+        else:
+            self.override_port = None
+            self.fallback_port = "AUTO"
+        logger.info(f"[SERIAL CONFIG] Port override set to: {self.override_port or 'AUTO-DETECT'}")
+
     def _is_valid_arduino(self, p) -> bool:
-        if not p.description or p.description == "n/a" or "Unknown" in p.description:
+        """Validate if a port info object matches an Arduino / Mega 2560 device."""
+        desc = (p.description or "").lower()
+        hwid = (getattr(p, "hwid", "") or "").lower()
+        mfg = (getattr(p, "manufacturer", "") or "").lower()
+
+        # Reject Bluetooth serial links and explicitly unknown devices
+        if "bluetooth" in desc or "bthenum" in hwid or "bth\\" in hwid:
             return False
-        
-        if "Bluetooth" in p.description:
+        if "unknown" in desc:
             return False
-            
-        # Check by common Arduino identifiers
-        arduino_keywords = ["Arduino", "CH340", "CP210x", "FTDI", "USB Serial"]
-        if any(kw in p.description for kw in arduino_keywords):
+
+        # 1. Match by hardware USB Vendor ID (Official Arduino, CH340, CP210x, FTDI)
+        # Note: On Windows, CH340 drivers often report description as 'n/a' while VID is 0x1A86!
+        if getattr(p, "vid", None) in ARDUINO_VIDS:
             return True
-            
-        if p.manufacturer and "Arduino" in p.manufacturer:
-            return True
-            
+
+        # 2. Match by descriptive keywords if description is populated
+        if p.description and p.description != "n/a":
+            arduino_keywords = ["arduino", "ch340", "cp210", "ftdi", "mega 2560", "atmega", "usb serial", "usb-serial", "usb_serial"]
+            if any(kw in desc or kw in mfg or kw in hwid for kw in arduino_keywords):
+                return True
+
         return False
 
     def detect_arduino(self) -> Optional[serial.tools.list_ports_common.ListPortInfo]:
@@ -97,27 +142,43 @@ class SerialManager:
         ports = list(serial.tools.list_ports.comports())
         if not ports:
             return None
-            
-        # First check the fallback port but ONLY if it is valid
+
+        # 1. First check configured / override port if specified
+        target_port = self.override_port or (self.fallback_port if self.fallback_port and self.fallback_port.upper() != "AUTO" else None)
+        if target_port:
+            for p in ports:
+                if p.device.upper() == target_port.upper():
+                    if self._is_valid_arduino(p):
+                        logger.info(f"[SERIAL DETECT] Configured port {p.device} validated as Arduino device ({p.description}).")
+                        self.state = ConnectionState.DETECTED
+                        return p
+                    else:
+                        logger.warning(f"[SERIAL DETECT] Configured port {target_port} found but not recognized as Arduino ({p.description}).")
+
+        # 2. Auto-detect by exact Arduino / CH340 USB VID
         for p in ports:
-            if p.device == self.fallback_port:
+            if getattr(p, "vid", None) in ARDUINO_VIDS:
                 if self._is_valid_arduino(p):
-                    logger.info(f"Configured port {self.fallback_port} validated as Arduino.")
+                    logger.info(f"[SERIAL DETECT] Auto-detected Arduino by VID/PID: {p.device} (VID:0x{p.vid:04X} PID:0x{getattr(p, 'pid', 0):04X} - {p.description})")
                     self.state = ConnectionState.DETECTED
                     return p
-                    
-        # Auto-detect Arduino
+
+        # 3. Auto-detect by description / keywords
         for p in ports:
             if self._is_valid_arduino(p):
-                logger.info(f"Auto-detected Arduino on: {p.device} ({p.description})")
+                logger.info(f"[SERIAL DETECT] Auto-detected Arduino by description: {p.device} ({p.description})")
                 self.state = ConnectionState.DETECTED
                 return p
-                
-        logger.warning("No valid Arduino found.")
+
+        logger.warning(f"[SERIAL DETECT] No valid Arduino found among available ports: {[p.device for p in ports]}")
         return None
 
     def connect(self) -> bool:
         """Attempt to connect to the Arduino."""
+        if self.paused:
+            logger.info("[SERIAL CONNECT] Reader is currently paused. Skipping connect.")
+            return False
+
         if self.connected and self.ser and self.ser.is_open:
             self.state = ConnectionState.CONNECTED
             return True
@@ -127,11 +188,15 @@ class SerialManager:
             ports = list(serial.tools.list_ports.comports())
             found = False
             for p in ports:
-                if p.device == self.port and p.vid == self.device_info.get("vid") and p.pid == self.device_info.get("pid"):
-                    found = True
-                    break
+                if p.device == self.port:
+                    if self.device_info.get("vid") is not None and getattr(p, "vid", None) == self.device_info.get("vid"):
+                        found = True
+                        break
+                    elif self._is_valid_arduino(p):
+                        found = True
+                        break
             if not found:
-                # Need to re-detect
+                # Port has disappeared or changed, re-detect
                 self.port = None
                 self.device_info = None
                 self.state = ConnectionState.DISCONNECTED
@@ -174,7 +239,6 @@ class SerialManager:
                 time.sleep(0.05)
                 
             self.connected = True
-            self.paused = False
             self.last_error = None
             self.state = ConnectionState.CONNECTED
             self.backoff_time = 1.0  # Reset backoff on successful connect
@@ -199,11 +263,54 @@ class SerialManager:
             self.state = ConnectionState.ERROR
             return False
 
+    def pause(self) -> Dict[str, Any]:
+        """Release the serial port so Arduino IDE or avrdude can upload firmware."""
+        with self._thread_lock:
+            self.paused = True
+            was_connected = self.connected
+            released_port = self.port
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.close()
+                except Exception as e:
+                    logger.warning(f"[SERIAL RELEASE ERROR] timestamp={datetime.now().isoformat()} Error closing serial port: {e}")
+            self.ser = None
+            self.connected = False
+            self.state = ConnectionState.DISCONNECTED
+            now = datetime.now()
+            logger.info(
+                f"[SERIAL PORT RELEASED] timestamp={now.isoformat()} "
+                f"port={released_port} reader paused for firmware upload."
+            )
+            return {
+                "status": "paused",
+                "port": released_port,
+                "was_connected": was_connected,
+                "message": "Serial port released. You can now upload firmware in Arduino IDE."
+            }
+
+    def resume(self) -> Dict[str, Any]:
+        """Resume the serial reader after firmware upload is complete."""
+        with self._thread_lock:
+            self.paused = False
+            self.backoff_time = 1.0
+            now = datetime.now()
+            logger.info(
+                f"[SERIAL PORT RESUMED] timestamp={now.isoformat()} "
+                f"resuming serial reader on {self.port or 'auto-detect'}..."
+            )
+            success = self.connect()
+            return {
+                "status": "resumed",
+                "port": self.port,
+                "connected": success,
+                "message": "Serial reader resumed." if success else "Serial reader resumed; waiting for device to reconnect."
+            }
+
     def disconnect(self, reason: str = "normal"):
-        """Disconnect from the Arduino."""
+        """Disconnect from the Arduino without entering paused state."""
         was_connected = self.connected
         self.connected = False
-        self.paused = True
         self.state = ConnectionState.DISCONNECTED
         if self.ser and self.ser.is_open:
             try:
@@ -222,18 +329,22 @@ class SerialManager:
 
     def reconnect(self):
         """Disconnect and reconnect with exponential backoff."""
+        if self.paused:
+            logger.debug("[SERIAL RECONNECT] Reader is paused; skipping reconnect.")
+            return
+
         now = datetime.now()
         logger.info(f"[SERIAL RECONNECT] timestamp={now.isoformat()} port={self.port} attempt={self.reconnect_count + 1} backoff={self.backoff_time}s")
         self.reconnect_count += 1
         self.disconnect(reason="reconnect")
         
-        # Sleep for 1 second before attempting re-connect
+        # Sleep briefly before attempting re-connect
         for _ in range(5):
-            if not getattr(self, 'running', True):
+            if not getattr(self, 'running', True) or self.paused:
                 return
             time.sleep(0.2)
             
-        if getattr(self, 'running', True):
+        if getattr(self, 'running', True) and not self.paused:
             self.connect()
 
     def start(self, callback: Callable[[Dict[str, Any]], None]):
@@ -260,7 +371,7 @@ class SerialManager:
 
     def write(self, data: str):
         """Write data to the Arduino."""
-        if self.ser and self.connected:
+        if self.ser and self.connected and not self.paused:
             try:
                 if not data.endswith('\n'):
                     data += '\n'
@@ -283,7 +394,7 @@ class SerialManager:
             
         while getattr(self, 'running', True):
             if getattr(self, 'paused', False):
-                time.sleep(1)
+                time.sleep(0.5)
                 continue
                 
             if not self.connected or not self.ser:
@@ -378,11 +489,14 @@ class SerialManager:
             except serial.SerialException as e:
                 self.errors += 1
                 logger.error(f"[SERIAL ERROR] timestamp={datetime.now().isoformat()} Connection lost on {self.port}: {e}")
-                self.connected = False
+                self.disconnect(reason="connection_lost")
+                # Clear port on connection lost so auto-detection finds the newly enumerated COM port
+                self.port = None
+                self.device_info = None
             except Exception as e:
                 self.errors += 1
                 logger.error(f"[SERIAL UNEXPECTED] timestamp={datetime.now().isoformat()} Loop error: {e}", exc_info=True)
-                time.sleep(1)
+                time.sleep(0.5)
 
     def get_status(self) -> Dict[str, Any]:
         """Return the current status of the serial manager."""

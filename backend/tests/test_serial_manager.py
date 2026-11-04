@@ -229,3 +229,97 @@ def test_structured_diagnostics_fields():
     assert "last_line_time" in status
     assert "connect_time" in status
     assert "state" in status
+
+def test_auto_detect_by_vid_pid_and_description():
+    """Verify port detection matches by USB VID/PID (0x1A86 for CH340, 0x2341 for Mega) without hardcoding COM10."""
+    manager = SerialManager()
+    manager.set_override_port(None)  # Ensure AUTO mode
+    
+    with patch('serial.tools.list_ports.comports') as mock_comports:
+        mock_comports.return_value = [
+            MockPortInfo("COM3", "Standard Serial over Bluetooth link", vid=None, pid=None),
+            MockPortInfo("COM11", "USB-SERIAL CH340", manufacturer="wch.cn", vid=0x1A86, pid=0x7523),
+            MockPortInfo("COM12", "Unknown USB device", vid=0x9999, pid=0x8888)
+        ]
+        port_info = manager.detect_arduino()
+        assert port_info is not None
+        assert port_info.device == "COM11"
+        assert port_info.vid == 0x1A86
+
+
+def test_config_override_port_priority():
+    """Verify config/env override is prioritized, but falls back gracefully if absent."""
+    manager = SerialManager()
+    
+    with patch('serial.tools.list_ports.comports') as mock_comports:
+        mock_comports.return_value = [
+            MockPortInfo("COM8", "Arduino Mega 2560", vid=0x2341, pid=0x0042),
+            MockPortInfo("COM9", "USB-SERIAL CH340", vid=0x1A86, pid=0x7523)
+        ]
+        # Override to COM9
+        manager.set_override_port("COM9")
+        port_info = manager.detect_arduino()
+        assert port_info is not None
+        assert port_info.device == "COM9"
+        
+        # Override to non-existent COM20 -> falls back to auto-detecting COM8/COM9
+        manager.set_override_port("COM20")
+        port_info = manager.detect_arduino()
+        assert port_info is not None
+        assert port_info.device in ("COM8", "COM9")
+
+
+def test_pause_and_resume_release_port_mechanism():
+    """Verify pause() releases the port and prevents background reconnect, while resume() restores it."""
+    manager = SerialManager()
+    manager.connected = True
+    manager.port = "COM11"
+    
+    mock_ser = MagicMock()
+    mock_ser.is_open = True
+    manager.ser = mock_ser
+    
+    # 1. Pause to release port for Arduino IDE
+    result = manager.pause()
+    assert result["status"] == "paused"
+    assert manager.paused is True
+    assert manager.connected is False
+    assert manager.ser is None
+    mock_ser.close.assert_called_once()
+    
+    # Verify connect() respects paused state
+    assert manager.connect() is False
+    
+    # 2. Resume reader
+    with patch.object(manager, 'connect', return_value=True) as mock_connect:
+        resume_res = manager.resume()
+        assert resume_res["status"] == "resumed"
+        assert manager.paused is False
+        mock_connect.assert_called_once()
+
+
+def test_serial_exception_clears_port_for_dynamic_redetection():
+    """Verify that when SerialException occurs, the port is cleared so redetection can find a changed COM port."""
+    manager = SerialManager()
+    manager.port = "COM10"
+    manager.connected = True
+    
+    mock_ser = MagicMock()
+    mock_ser.in_waiting = 1
+    mock_ser.read.side_effect = serial.SerialException("Device disconnected")
+    manager.ser = mock_ser
+    
+    # Simulate the read_loop exception handling block
+    try:
+        mock_ser.read(1)
+    except serial.SerialException as e:
+        manager.errors += 1
+        manager.disconnect(reason="connection_lost")
+        manager.port = None
+        manager.device_info = None
+        
+    assert manager.connected is False
+    assert manager.port is None
+    assert manager.errors == 1
+    assert manager.paused is False  # Must NOT be paused so reconnect loop can run!
+

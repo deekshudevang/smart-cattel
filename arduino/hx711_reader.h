@@ -105,6 +105,11 @@ public:
     return (digitalRead(dout_pin) == LOW);
   }
 
+  // Non-blocking readiness check (alias)
+  bool is_ready() {
+    return isReady();
+  }
+
   // Non-blocking single reading of 24 bits + 1 pulse (Channel A, Gain 128)
   bool readRawNonBlocking(long &out_val) {
     if (!isReady()) {

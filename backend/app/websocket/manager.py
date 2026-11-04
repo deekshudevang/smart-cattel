@@ -46,7 +46,8 @@ class ConnectionManager:
             
         conn = Connection(websocket, client_id)
         self.active_connections[client_id] = conn
-        client_ip = getattr(websocket.client, 'host', 'unknown') if websocket.client else 'unknown'
+        client_obj = getattr(websocket, 'client', None)
+        client_ip = getattr(client_obj, 'host', 'unknown') if client_obj else 'unknown'
         logger.info(
             f"[WS CLIENT CONNECT] timestamp={datetime.now(timezone.utc).isoformat()} "
             f"client_id={client_id} ip={client_ip} reconnect={reconnect} "

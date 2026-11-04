@@ -236,19 +236,40 @@ def get_arduino_status():
     }
 
 @app.post("/api/arduino/disconnect")
+@app.get("/api/arduino/disconnect")
 def arduino_disconnect():
     serial_manager.disconnect()
     return {"status": "success", "message": "Disconnected from Arduino"}
 
 @app.post("/api/arduino/release")
-def arduino_release():
-    serial_manager.disconnect()
-    return {"status": "success", "message": "Released Arduino"}
+@app.get("/api/arduino/release")
+@app.post("/api/serial/pause")
+@app.get("/api/serial/pause")
+@app.post("/api/serial/release")
+@app.get("/api/serial/release")
+def release_serial_port():
+    """Release the serial port so Arduino IDE can flash firmware without COM port conflict."""
+    return serial_manager.pause()
 
 @app.post("/api/arduino/reconnect")
-def arduino_reconnect():
-    serial_manager.reconnect()
-    return {"status": "success", "message": "Reconnecting to Arduino"}
+@app.get("/api/arduino/reconnect")
+@app.post("/api/serial/resume")
+@app.get("/api/serial/resume")
+def resume_serial_port():
+    """Resume the serial reader after firmware upload completes."""
+    return serial_manager.resume()
+
+@app.get("/api/serial/status")
+def get_serial_status():
+    """Get real-time connection, port, and pause state of the serial reader."""
+    return serial_manager.get_status()
+
+@app.post("/api/serial/port")
+def set_serial_port_override(payload: dict):
+    """Override the target serial port dynamically (e.g. {'port': 'COM11'} or {'port': 'AUTO'})."""
+    port = payload.get("port")
+    serial_manager.set_override_port(port)
+    return {"status": "success", "override_port": serial_manager.override_port or "AUTO"}
 
 @app.post("/api/sensor/data")
 async def receive_sensor_data(request: Request):

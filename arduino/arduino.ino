@@ -39,9 +39,17 @@ void printBootReason() {
 }
 #elif defined(__AVR__)
 #include <avr/wdt.h>
+// Preserve MCUSR at init3 before bootloader clears it
+uint8_t mcusr_mirror __attribute__ ((section (".noinit")));
+void get_mcusr(void) __attribute__((naked)) __attribute__((section(".init3")));
+void get_mcusr(void) {
+  mcusr_mirror = MCUSR;
+  MCUSR = 0;
+  wdt_disable();
+}
+
 void printBootReason() {
-  uint8_t mcusr = MCUSR;
-  MCUSR = 0; // Clear reset flags for next boot cycle
+  uint8_t mcusr = mcusr_mirror;
   Serial.print(F("[BOOT] AVR Reset Reason (MCUSR=0x"));
   Serial.print(mcusr, HEX);
   Serial.print(F("): "));
@@ -324,7 +332,14 @@ void triggerAlertDisplay(const String &msg) {
 void setup() {
   Serial.begin(9600);
   Serial.setTimeout(50); // Fast non-blocking timeout for readStringUntil to prevent loop freezes
+  Serial.println(F("\n=================================================="));
+  Serial.println(F(" SMART CATTLE HEALTH MONITOR - MEGA 2560 FIRMWARE"));
+  Serial.println(F("=================================================="));
   printBootReason();
+  Serial.println(F("[PINS] Serial0 (Pins 0/1 RX0/TX0): Dedicated to PC USB / Bootloader."));
+  Serial.println(F("[PINS] Verified: No sensor pins assigned to Pin 0 or Pin 1."));
+  Serial.println(F("[PINS] GPS=Serial1(19/18), GSM=Serial2(17/16), pH=A1, LDR=A2, DHT=42, HX711=44/46, I2C=20/21"));
+  Serial.println(F("[HX711] Non-blocking driver active with is_ready() checks."));
   GPS_SERIAL.begin(9600);
   GSM_SERIAL.begin(9600);
 

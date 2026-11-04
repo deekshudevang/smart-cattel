@@ -51,7 +51,15 @@ for /f "tokens=5" %%p in ('netstat -ano ^| findstr :8000 ^| findstr LISTENING') 
     timeout /t 1 /nobreak >nul
 )
 
-:: 4. Detect Local LAN IP for Android Configuration
+:: 4. Free Serial Port if occupied by Arduino IDE Serial Monitor
+tasklist /FI "IMAGENAME eq serial-monitor.exe" 2>nul | findstr /i "serial-monitor.exe" >nul
+if not errorlevel 1 (
+    echo [INFO] Arduino IDE Serial Monitor was locking the serial port.
+    echo Freeing serial port for backend telemetry...
+    taskkill /F /IM serial-monitor.exe >nul 2>&1
+)
+
+:: 5. Detect Local LAN IP for Android Configuration
 set "LAN_IP=127.0.0.1"
 for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /c:"IPv4 Address"') do (
     set "LAN_IP=%%a"
