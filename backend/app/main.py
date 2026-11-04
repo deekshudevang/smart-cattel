@@ -17,7 +17,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query, HTT
 from pydantic import BaseModel
 from typing import Optional, List
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 from app.database.database import engine, SessionLocal, get_db
 from app.database import models
@@ -75,6 +75,65 @@ async def global_exception_handler(request: Request, exc: Exception):
 def prod_health_check():
     """Production health check endpoint for load balancers."""
     return {"status": "ok", "environment": settings.ENVIRONMENT, "database": "connected"}
+
+APK_PATH = os.path.join(PROJECT_ROOT, "smart-cattle-update.apk")
+if not os.path.exists(APK_PATH):
+    APK_PATH = os.path.join(PROJECT_ROOT, "android", "SmartCattle", "app", "build", "outputs", "apk", "debug", "app-debug.apk")
+
+@app.get("/app.apk")
+@app.get("/download/app")
+@app.get("/download")
+def download_app_apk():
+    """Direct 1-tap download of the updated Smart Cattle Android APK."""
+    if os.path.exists(APK_PATH):
+        return FileResponse(
+            path=APK_PATH,
+            filename="smart-cattle-update.apk",
+            media_type="application/vnd.android.package-archive"
+        )
+    raise HTTPException(status_code=404, detail="APK build not found. Please build with assembleDebug.")
+
+@app.get("/", response_class=HTMLResponse)
+def index_download_page():
+    """Clean mobile download landing page for installing the app."""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Cattle App - Download & Install</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; text-align: center; }
+        .card { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 32px 24px; max-width: 440px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
+        .badge { display: inline-block; background: #065f46; color: #34d399; padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: 600; text-transform: uppercase; margin-bottom: 16px; }
+        h1 { margin: 0 0 8px; font-size: 24px; }
+        p { color: #94a3b8; font-size: 14px; margin: 0 0 24px; line-height: 1.5; }
+        .features { text-align: left; background: #0f172a; border-radius: 12px; padding: 14px 16px; margin-bottom: 24px; font-size: 13px; color: #cbd5e1; }
+        .features li { margin-bottom: 6px; }
+        .features li:last-child { margin-bottom: 0; }
+        .btn { display: block; background: #2563eb; color: #ffffff; text-decoration: none; font-weight: 600; font-size: 16px; padding: 14px 20px; border-radius: 10px; transition: background 0.2s; }
+        .btn:hover { background: #1d4ed8; }
+        .note { margin-top: 16px; font-size: 12px; color: #64748b; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="badge">Latest Build Ready</div>
+        <h1>Smart Cattle Monitor</h1>
+        <p>Real-time livestock health, weight & step analytics.</p>
+        <div class="features">
+            <ul style="padding-left: 20px; margin: 0;">
+                <li>Steps & Total Steps Dashboard Cards</li>
+                <li>Live HX711 Weight Tracking & Tare</li>
+                <li>SpO2, Heart Rate, Temp, pH & Light</li>
+                <li>Automatic Reconnect with Heartbeat</li>
+            </ul>
+        </div>
+        <a href="/app.apk" class="btn">Download & Install App (APK)</a>
+        <div class="note">Open the downloaded file on your phone to complete installation.</div>
+    </div>
+</body>
+</html>"""
 
 class MilkProductionCreate(BaseModel):
     cattle_id: str

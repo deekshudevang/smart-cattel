@@ -83,7 +83,7 @@ echo [Press Ctrl+C in this window to stop the server]
 echo.
 
 cd /d "%~dp0backend"
-"%PYTHON_EXE%" -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+"%PYTHON_EXE%" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 if %errorlevel% neq 0 (
     echo.
