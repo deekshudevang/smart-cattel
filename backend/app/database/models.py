@@ -60,6 +60,7 @@ class Cattle(Base, BaseMixin):
     vaccinations = relationship("Vaccination", back_populates="cattle")
     health_assessments = relationship("HealthAssessment", back_populates="cattle")
     device_assignments = relationship("DeviceAssignment", back_populates="cattle")
+    weight_readings = relationship("CattleWeightReading", back_populates="cattle", cascade="all, delete-orphan")
 
 class SensorReading(Base, BaseMixin):
     __tablename__ = "sensor_readings"
@@ -109,6 +110,14 @@ class SensorReading(Base, BaseMixin):
     gps_lon = Column(Float, nullable=True)
     gps_satellites = Column(Integer, nullable=True)
     gsm_status = Column(String, nullable=True)
+
+    # Weight (Load Cell + HX711)
+    body_weight_kg = Column(Float, nullable=True)
+    weight_raw = Column(Integer, nullable=True)
+    weight_stable = Column(Boolean, default=False)
+    weight_calibrated = Column(Boolean, default=False)
+    weight_valid = Column(Boolean, default=False)
+    weight_sensor_status = Column(String, nullable=True)
     
     # Data Source & Provenance
     source = Column(String, default="serial", index=True)
@@ -290,4 +299,27 @@ class SmsLog(Base, BaseMixin):
     reason = Column(String, nullable=True)
     
     cattle = relationship("Cattle")
+
+
+class CattleWeightReading(Base, BaseMixin):
+    __tablename__ = "cattle_weight_readings"
+    id = Column(Integer, primary_key=True, index=True)
+    cattle_id = Column(String, ForeignKey("cattle.cattle_id"), index=True, nullable=False)
+    device_id = Column(String, ForeignKey("devices.device_id"), index=True, nullable=True)
+    weight_kg = Column(Float, nullable=False)
+    raw_value = Column(Integer, nullable=True)
+    is_stable = Column(Boolean, default=True)
+    is_calibrated = Column(Boolean, default=True)
+    measured_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    source = Column(String, default="serial", index=True)
+    is_simulated = Column(Boolean, default=False, index=True)
+
+    cattle = relationship("Cattle", back_populates="weight_readings")
+
+    __table_args__ = (
+        Index('idx_weight_cattle_measured', 'cattle_id', 'measured_at'),
+        Index('idx_weight_is_simulated', 'is_simulated'),
+    )
+
 

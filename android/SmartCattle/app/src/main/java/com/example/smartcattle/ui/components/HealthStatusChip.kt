@@ -56,28 +56,29 @@ fun HealthStatusChip(
         HealthStatusType.OFFLINE -> Triple(healthColors.offline, Icons.Default.WifiOff, R.string.status_offline)
     }
 
-    val displayText = if (status.isNotBlank()) status.uppercase() else stringResource(defaultLabelRes).uppercase()
+    val rawText = if (status.isNotBlank()) status else stringResource(defaultLabelRes)
+    val displayText = rawText.lowercase().replaceFirstChar { it.uppercase() }
 
     Row(
         modifier = modifier
             .clip(CircleShape)
-            .background(baseColor.copy(alpha = 0.16f))
-            .border(width = 1.dp, color = baseColor.copy(alpha = 0.5f), shape = CircleShape)
-            .padding(horizontal = spacing.sm, vertical = spacing.xxs),
+            .background(baseColor.copy(alpha = 0.08f))
+            .border(width = 1.dp, color = baseColor.copy(alpha = 0.22f), shape = CircleShape)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(spacing.xxs)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = baseColor,
-            modifier = Modifier.size(12.dp)
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .background(baseColor)
         )
         Text(
             text = displayText,
             color = baseColor,
             style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.Bold,
+            fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )

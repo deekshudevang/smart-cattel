@@ -121,6 +121,107 @@ class DatabaseService:
         finally:
             db.close()
 
+    @staticmethod
+    def save_weight_reading(
+        cattle_id: str,
+        weight_kg: float,
+        device_id: str = None,
+        raw_value: int = None,
+        is_stable: bool = True,
+        is_calibrated: bool = True,
+        measured_at: datetime = None,
+        source: str = "manual",
+        is_simulated: bool = False
+    ) -> models.CattleWeightReading:
+        db = SessionLocal()
+        try:
+            if measured_at is None:
+                measured_at = datetime.now(timezone.utc)
+            reading = models.CattleWeightReading(
+                cattle_id=cattle_id,
+                device_id=device_id,
+                weight_kg=round(weight_kg, 2),
+                raw_value=raw_value,
+                is_stable=is_stable,
+                is_calibrated=is_calibrated,
+                measured_at=measured_at,
+                source=source,
+                is_simulated=is_simulated
+            )
+            db.add(reading)
+            cow = db.query(models.Cattle).filter(models.Cattle.cattle_id == cattle_id).first()
+            if cow:
+                cow.weight = round(weight_kg, 2)
+            db.commit()
+            db.refresh(reading)
+            return reading
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    @staticmethod
+    def get_weight_statistics(cattle_id: str) -> dict:
+        db = SessionLocal()
+        try:
+            from datetime import timedelta
+            now = datetime.now(timezone.utc)
+
+            readings = db.query(models.CattleWeightReading).filter(
+                models.CattleWeightReading.cattle_id == cattle_id
+            ).order_by(models.CattleWeightReading.measured_at.desc()).limit(100).all()
+
+            count = len(readings)
+            if not readings:
+                cow = db.query(models.Cattle).filter(models.Cattle.cattle_id == cattle_id).first()
+                cow_w = cow.weight if cow else None
+                return {
+                    "cattle_id": cattle_id,
+                    "current_weight_kg": cow_w,
+                    "previous_weight_kg": None,
+                    "difference_kg": 0.0 if cow_w else None,
+                    "percentage_change": 0.0 if cow_w else None,
+                    "trend": "stable",
+                    "average_7d": cow_w,
+                    "average_30d": cow_w,
+                    "last_measured_at": None,
+                    "is_stable": True if cow_w else False,
+                    "is_calibrated": True if cow_w else False,
+                    "readings_count": 1 if cow_w else 0
+                }
+
+            latest = readings[0]
+            current_w = latest.weight_kg
+            previous_w = readings[1].weight_kg if len(readings) > 1 else current_w
+            diff = round(current_w - previous_w, 2)
+            pct = round((diff / previous_w * 100.0), 2) if previous_w else 0.0
+            trend = "gain" if diff > 0.5 else ("loss" if diff < -0.5 else "stable")
+
+            weights_7d = [r.weight_kg for r in readings if (now - (r.measured_at if r.measured_at.tzinfo else r.measured_at.replace(tzinfo=timezone.utc))).days <= 7]
+            weights_30d = [r.weight_kg for r in readings if (now - (r.measured_at if r.measured_at.tzinfo else r.measured_at.replace(tzinfo=timezone.utc))).days <= 30]
+
+            avg_7d = round(sum(weights_7d) / len(weights_7d), 2) if weights_7d else current_w
+            avg_30d = round(sum(weights_30d) / len(weights_30d), 2) if weights_30d else current_w
+
+            return {
+                "cattle_id": cattle_id,
+                "current_weight_kg": current_w,
+                "previous_weight_kg": previous_w,
+                "difference_kg": diff,
+                "percentage_change": pct,
+                "trend": trend,
+                "average_7d": avg_7d,
+                "average_30d": avg_30d,
+                "last_measured_at": latest.measured_at,
+                "is_stable": latest.is_stable,
+                "is_calibrated": latest.is_calibrated,
+                "readings_count": count
+            }
+        finally:
+            db.close()
+
+
 class AlertService:
     @staticmethod
     async def broadcast_alert(manager, cattle_id: str, data: dict, preds: dict, assessment: dict = None):
@@ -137,6 +238,8 @@ class AlertService:
             "cattle_id": cattle_id,
             "data": data,
             "health": health_with_overall,
+            "validity": data.get("validity", {}),
+            "validity_reasons": data.get("validity_reasons", {}),
             "source": data.get("source", "serial"),
             "is_simulated": data.get("is_simulated", False),
         }
@@ -145,7 +248,7 @@ class AlertService:
         _logger.info(
             f"[WS OUT] cattle={cattle_id} ldr={data.get('ldr')} "
             f"spo2={data.get('spo2')} bpm={data.get('bpm')} "
-            f"temp={data.get('temperature')} overall={overall}"
+            f"temp={data.get('temperature')} weight={data.get('body_weight_kg')} overall={overall}"
         )
         try:
             ws_event = manager.format_event(
@@ -221,17 +324,95 @@ class ValidationService:
         if not data.get("cattle_id"):
             data["cattle_id"] = device_id
 
-        # Sync heart_rate / bpm
-        if "bpm" in data and "heart_rate" not in data:
-            data["heart_rate"] = data["bpm"]
-        elif "heart_rate_bpm" in data and "heart_rate" not in data:
-            data["heart_rate"] = data["heart_rate_bpm"]
-        elif "heart_rate" in data and "bpm" not in data:
-            data["bpm"] = data["heart_rate"]
+        # Bidirectionally sync canonical keys and legacy aliases
+        # Heart rate: canonical "heart_rate", aliases "bpm", "heart_rate_bpm"
+        hr = data.get("heart_rate")
+        if hr is None:
+            hr = data.get("bpm") if data.get("bpm") is not None else data.get("heart_rate_bpm")
+        if hr is not None:
+            data["heart_rate"] = hr
+            data["bpm"] = hr
+            data["heart_rate_bpm"] = hr
+
+        # SpO2: canonical "spo2", alias "spo2_percent"
+        spo2 = data.get("spo2") if data.get("spo2") is not None else data.get("spo2_percent")
+        if spo2 is not None:
+            data["spo2"] = spo2
+            data["spo2_percent"] = spo2
+
+        # Temperature: canonical "temperature", alias "temperature_c"
+        temp = data.get("temperature") if data.get("temperature") is not None else data.get("temperature_c")
+        if temp is not None:
+            data["temperature"] = temp
+            data["temperature_c"] = temp
+
+        # pH: canonical "ph", alias "ph_value"
+        ph = data.get("ph") if data.get("ph") is not None else data.get("ph_value")
+        if ph is not None:
+            data["ph"] = ph
+            data["ph_value"] = ph
+
+        # LDR: canonical "ldr", alias "ldr_value"
+        ldr = data.get("ldr") if data.get("ldr") is not None else data.get("ldr_value")
+        if ldr is not None:
+            data["ldr"] = ldr
+            data["ldr_value"] = ldr
+
+        # Accelerometer / MEMS
+        if "mems_x" not in data and "accel_x" in data:
+            data["mems_x"] = data["accel_x"]
+        if "accel_x" not in data and "mems_x" in data:
+            data["accel_x"] = data["mems_x"]
+        if "mems_y" not in data and "accel_y" in data:
+            data["mems_y"] = data["accel_y"]
+        if "accel_y" not in data and "mems_y" in data:
+            data["accel_y"] = data["mems_y"]
+        if "mems_z" not in data and "accel_z" in data:
+            data["mems_z"] = data["accel_z"]
+        if "accel_z" not in data and "mems_z" in data:
+            data["accel_z"] = data["mems_z"]
 
         # Sync step counts
         if "step_count_today" not in data and "steps" in data:
             data["step_count_today"] = data["steps"]
+        if "steps" not in data and "step_count_today" in data:
+            data["steps"] = data["step_count_today"]
+
+        # Weight / Load Cell reconciliation
+        w = data.get("body_weight_kg")
+        if w is None:
+            w = data.get("weight_kg") if data.get("weight_kg") is not None else data.get("weight")
+        if w is not None:
+            try:
+                w_float = float(w)
+                if 0.0 <= w_float <= 1500.0:
+                    data["body_weight_kg"] = round(w_float, 2)
+                    data["weight_kg"] = round(w_float, 2)
+                    data["weight_valid"] = bool(data.get("weight_valid", True))
+                else:
+                    data["body_weight_kg"] = None
+                    data["weight_kg"] = None
+                    data["weight_valid"] = False
+            except (ValueError, TypeError):
+                data["body_weight_kg"] = None
+                data["weight_kg"] = None
+                data["weight_valid"] = False
+        else:
+            data["body_weight_kg"] = None
+            data["weight_kg"] = None
+            data["weight_valid"] = False
+
+        data["weight_stable"] = bool(data.get("weight_stable", False))
+        data["weight_calibrated"] = bool(data.get("weight_calibrated", False))
+        if not data.get("weight_sensor_status"):
+            if not data.get("weight_valid"):
+                data["weight_sensor_status"] = "disconnected"
+            elif not data.get("weight_calibrated"):
+                data["weight_sensor_status"] = "uncalibrated"
+            elif not data.get("weight_stable"):
+                data["weight_sensor_status"] = "unstable"
+            else:
+                data["weight_sensor_status"] = "stable"
 
         return data
 
@@ -266,7 +447,7 @@ class SensorService:
             f"steps_today={validated_data.get('step_count_today')} lifetime={validated_data.get('step_count_lifetime')} "
             f"heart_rate={validated_data.get('heart_rate')} spo2={validated_data.get('spo2')} "
             f"temp={validated_data.get('temperature')} ph={validated_data.get('ph')} "
-            f"ldr={validated_data.get('ldr')} "
+            f"ldr={validated_data.get('ldr')} weight={validated_data.get('body_weight_kg')} "
             f"mems=({validated_data.get('mems_x')},{validated_data.get('mems_y')},{validated_data.get('mems_z')}) "
             f"fall_detected={validated_data.get('fall_detected')}"
         )
@@ -285,7 +466,9 @@ class SensorService:
                 return {"status": "dropped", "reason": "deleted_cattle"}
 
             # Authoritative Step Management (Safeguard 11 & Safeguard 4)
-            incoming_lifetime = validated_data.get("step_count_lifetime")
+            # Only count steps if accelerometer_valid is True
+            accel_valid = validated_data.get("accelerometer_valid", True)
+            incoming_lifetime = validated_data.get("step_count_lifetime") if accel_valid else None
             boot_count = validated_data.get("boot_count")
             auth_today, auth_life = AuthoritativeStepManager.process_step_reading(
                 db=_db,
@@ -313,6 +496,39 @@ class SensorService:
                     steps=int(auth_today)
                 )
                 _db.add(new_act)
+
+            # Persist confirmed weight to Cattle profile and CattleWeightReading table
+            w_valid = validated_data.get("weight_valid", False)
+            w_stable = validated_data.get("weight_stable", False)
+            w_kg = validated_data.get("body_weight_kg")
+            if w_valid and w_stable and w_kg is not None and w_kg >= 10.0:
+                existing.weight = round(w_kg, 2)
+                last_w = _db.query(models.CattleWeightReading).filter(
+                    models.CattleWeightReading.cattle_id == cattle_id
+                ).order_by(models.CattleWeightReading.measured_at.desc()).first()
+                now_utc = datetime.now(timezone.utc)
+                should_save = False
+                if not last_w:
+                    should_save = True
+                else:
+                    m_time = last_w.measured_at if last_w.measured_at.tzinfo else last_w.measured_at.replace(tzinfo=timezone.utc)
+                    elapsed = (now_utc - m_time).total_seconds()
+                    if elapsed >= 60 or abs(last_w.weight_kg - w_kg) >= 2.0:
+                        should_save = True
+                if should_save:
+                    new_w_rec = models.CattleWeightReading(
+                        cattle_id=cattle_id,
+                        device_id=validated_data.get("device_id"),
+                        weight_kg=round(w_kg, 2),
+                        raw_value=validated_data.get("weight_raw"),
+                        is_stable=w_stable,
+                        is_calibrated=validated_data.get("weight_calibrated", True),
+                        measured_at=now_utc,
+                        source=validated_data.get("source", "serial"),
+                        is_simulated=validated_data.get("is_simulated", False)
+                    )
+                    _db.add(new_w_rec)
+
             _db.commit()
         except Exception as _e:
             _db.rollback()

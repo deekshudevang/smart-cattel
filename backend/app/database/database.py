@@ -31,11 +31,18 @@ def ensure_sqlite_columns():
                     table_info = conn.execute(text("PRAGMA table_info(sensor_readings)")).fetchall()
                     existing_cols = {row[1] for row in table_info}
                     cols_to_add = [
+                        ("device_id", "TEXT"),
                         ("step_count_today", "INTEGER"),
                         ("step_count_lifetime", "INTEGER"),
                         ("acceleration_x", "REAL"),
                         ("acceleration_y", "REAL"),
                         ("acceleration_z", "REAL"),
+                        ("acceleration_magnitude", "REAL"),
+                        ("activity_state", "TEXT"),
+                        ("activity_score", "REAL"),
+                        ("fall_detected", "BOOLEAN DEFAULT 0"),
+                        ("fall_confidence", "REAL"),
+                        ("peak_acceleration", "REAL"),
                         ("accelerometer_valid", "BOOLEAN DEFAULT 0"),
                         ("heart_rate_valid", "BOOLEAN DEFAULT 0"),
                         ("spo2_valid", "BOOLEAN DEFAULT 0"),
@@ -43,10 +50,58 @@ def ensure_sqlite_columns():
                         ("ph_valid", "BOOLEAN DEFAULT 0"),
                         ("ldr_valid", "BOOLEAN DEFAULT 0"),
                         ("device_connected", "BOOLEAN DEFAULT 1"),
+                        ("gps_valid", "BOOLEAN DEFAULT 0"),
+                        ("gps_lat", "REAL"),
+                        ("gps_lon", "REAL"),
+                        ("gps_satellites", "INTEGER"),
+                        ("gsm_status", "TEXT"),
+                        ("source", "TEXT DEFAULT 'serial'"),
+                        ("is_simulated", "BOOLEAN DEFAULT 0"),
+                        ("raw_packet", "TEXT"),
+                        ("checksum_valid", "BOOLEAN DEFAULT 1"),
+                        ("created_at", "DATETIME"),
+                        ("updated_at", "DATETIME"),
+                        ("deleted", "BOOLEAN DEFAULT 0"),
                     ]
                     for col_name, col_type in cols_to_add:
                         if col_name not in existing_cols:
                             conn.execute(text(f"ALTER TABLE sensor_readings ADD COLUMN {col_name} {col_type}"))
+
+                    cattle_info = conn.execute(text("PRAGMA table_info(cattle)")).fetchall()
+                    existing_cattle_cols = {row[1] for row in cattle_info}
+                    cattle_cols_to_add = [
+                        ("photo", "TEXT"),
+                        ("weight", "REAL"),
+                        ("tag_id", "TEXT"),
+                        ("lactation_stage", "TEXT"),
+                        ("pregnancy_status", "TEXT"),
+                        ("medical_history", "TEXT"),
+                        ("created_at", "DATETIME"),
+                        ("updated_at", "DATETIME"),
+                    ]
+                    for col_name, col_type in cattle_cols_to_add:
+                        if col_name not in existing_cattle_cols:
+                            conn.execute(text(f"ALTER TABLE cattle ADD COLUMN {col_name} {col_type}"))
+                    alerts_res = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='alerts'"))
+                    if alerts_res.fetchone():
+                        alerts_info = conn.execute(text("PRAGMA table_info(alerts)")).fetchall()
+                        existing_alert_cols = {row[1] for row in alerts_info}
+                        alert_cols_to_add = [
+                            ("device_id", "TEXT"),
+                            ("type", "TEXT"),
+                            ("message", "TEXT"),
+                            ("value", "REAL"),
+                            ("threshold", "REAL"),
+                            ("confidence", "REAL"),
+                            ("acknowledged_at", "DATETIME"),
+                            ("resolved_at", "DATETIME"),
+                        ]
+                        for col_name, col_type in alert_cols_to_add:
+                            if col_name not in existing_alert_cols:
+                                conn.execute(text(f"ALTER TABLE alerts ADD COLUMN {col_name} {col_type}"))
+                        if "alert_type" in existing_alert_cols and "type" in existing_alert_cols:
+                            conn.execute(text("UPDATE alerts SET type = alert_type WHERE type IS NULL AND alert_type IS NOT NULL"))
+
                     conn.commit()
         except Exception:
             pass

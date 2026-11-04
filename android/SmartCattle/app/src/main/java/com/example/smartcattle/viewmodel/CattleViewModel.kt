@@ -124,18 +124,30 @@ class CattleViewModel(private val repository: CattleRepository) : ViewModel() {
                         else -> null
                     }
 
-                    _latestData.value = SensorData(
+                    val parsedSpo2 = getIntOrNull("spo2") ?: getIntOrNull("spo2_percent")
+                    val parsedHr = getIntOrNull("heart_rate") ?: getIntOrNull("bpm") ?: getIntOrNull("heart_rate_bpm")
+                    val parsedTemp = getFloatOrNull("temperature") ?: getFloatOrNull("temperature_c")
+                    val parsedPh = getFloatOrNull("ph") ?: getFloatOrNull("ph_value")
+                    val parsedLdr = getIntOrNull("ldr") ?: getIntOrNull("ldr_value")
+                    val parsedWeight = getFloatOrNull("body_weight_kg") ?: getFloatOrNull("weight_kg") ?: getFloatOrNull("weight")
+                    val weightRaw = getIntOrNull("weight_raw")
+                    val weightStable = data.optBoolean("weight_stable", false)
+                    val weightCalibrated = data.optBoolean("weight_calibrated", false)
+                    val weightValid = getBooleanOrTrue("weight_valid")
+                    val weightStatus = data.optString("weight_sensor_status", "active")
+
+                    val sensorModel = SensorData(
                         cattleId    = root.optString("cattle_id", rawRoot.optString("cattle_id", "CATTLE-001")),
                         timestamp   = root.optString("timestamp", rawRoot.optString("timestamp", "")),
-                        spo2        = getIntOrNull("spo2"),
-                        heart_rate  = getIntOrNull("heart_rate"),
-                        temperature = getFloatOrNull("temperature"),
+                        spo2        = parsedSpo2,
+                        heart_rate  = parsedHr,
+                        temperature = parsedTemp,
                         humidity    = getFloatOrNull("humidity"),
                         memsX       = accelX,
                         memsY       = accelY,
                         memsZ       = accelZ,
-                        ph          = getFloatOrNull("ph"),
-                        ldr         = getIntOrNull("ldr"),
+                        ph          = parsedPh,
+                        ldr         = parsedLdr,
                         fallDetected = fallDetected,
                         health = HealthStatus(
                             spo2        = healthStr("spo2"),
@@ -157,8 +169,17 @@ class CattleViewModel(private val repository: CattleRepository) : ViewModel() {
                         temperatureValid   = getBooleanOrTrue("temperature_valid"),
                         phValid            = getBooleanOrTrue("ph_valid"),
                         ldrValid           = getBooleanOrTrue("ldr_valid"),
-                        deviceConnected    = getBooleanOrTrue("device_connected")
+                        deviceConnected    = getBooleanOrTrue("device_connected"),
+                        bodyWeightKg       = parsedWeight,
+                        weightRaw          = weightRaw,
+                        weightStable       = weightStable,
+                        weightCalibrated   = weightCalibrated,
+                        weightValid        = weightValid,
+                        weightSensorStatus = weightStatus
                     )
+                    _latestData.value = sensorModel
+                    android.util.Log.i("SmartCattle", "[CattleViewModel WS RAW] $jsonString")
+                    android.util.Log.i("SmartCattle", "[CattleViewModel WS PARSED] cid=${sensorModel.cattleId} hr=${sensorModel.heart_rate} spo2=${sensorModel.spo2} temp=${sensorModel.temperature}")
                 }
                 "alert" -> {
                     // Optionally refresh alerts list on server push

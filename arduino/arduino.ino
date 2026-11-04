@@ -10,10 +10,53 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
 #include <EEPROM.h>
+#include "hx711_reader.h"
+HX711Reader load_cell;
 
 CowStepCounter step_counter;
-// DIAGNOSTIC BUILD — MAX30102 I2C scan + raw IR/RED output enabled
-#define DEBUG_MAX30102 1 // Set to 1 to enable MAX30102 debug output
+// DIAGNOSTIC BUILD — MAX30102 I2C scan enabled; continuous raw print disabled to prevent UART TX saturation
+#define DEBUG_MAX30102 0 // Set to 1 only for dedicated bench debug
+
+// ---------- Boot / Reset Reason Diagnostics ----------
+#if defined(ESP32)
+#include <esp_system.h>
+void printBootReason() {
+  esp_reset_reason_t reason = esp_reset_reason();
+  Serial.print(F("[BOOT] ESP32 Reset Reason: "));
+  switch (reason) {
+    case ESP_RST_POWERON:   Serial.println(F("POWER_ON (Normal startup)")); break;
+    case ESP_RST_EXT:       Serial.println(F("EXTERNAL_PIN (Manual/DTR reset)")); break;
+    case ESP_RST_SW:        Serial.println(F("SOFTWARE_RESET")); break;
+    case ESP_RST_PANIC:     Serial.println(F("CRASH_PANIC (Fatal exception!)")); break;
+    case ESP_RST_INT_WDT:   Serial.println(F("INTERRUPT_WATCHDOG")); break;
+    case ESP_RST_TASK_WDT:  Serial.println(F("TASK_WATCHDOG")); break;
+    case ESP_RST_WDT:       Serial.println(F("WATCHDOG_RESET")); break;
+    case ESP_RST_DEEPSLEEP: Serial.println(F("DEEP_SLEEP")); break;
+    case ESP_RST_BROWNOUT:  Serial.println(F("BROWNOUT (Power supply unstable - check 5V/3.3V rail!)")); break;
+    case ESP_RST_SDIO:      Serial.println(F("SDIO_RESET")); break;
+    default:                Serial.println(F("UNKNOWN")); break;
+  }
+}
+#elif defined(__AVR__)
+#include <avr/wdt.h>
+void printBootReason() {
+  uint8_t mcusr = MCUSR;
+  MCUSR = 0; // Clear reset flags for next boot cycle
+  Serial.print(F("[BOOT] AVR Reset Reason (MCUSR=0x"));
+  Serial.print(mcusr, HEX);
+  Serial.print(F("): "));
+  if (mcusr & (1 << PORF))  Serial.print(F("Power-on Reset (PORF) "));
+  if (mcusr & (1 << EXTRF)) Serial.print(F("External Reset Pin/DTR (EXTRF) "));
+  if (mcusr & (1 << BORF))  Serial.print(F("Brown-out Reset (BORF - Power supply voltage dipped!) "));
+  if (mcusr & (1 << WDRF))  Serial.print(F("Watchdog Timer Reset (WDRF) "));
+  if (mcusr == 0)           Serial.print(F("Normal / Software cleared"));
+  Serial.println();
+}
+#else
+void printBootReason() {
+  Serial.println(F("[BOOT] Reset Reason: Standard power startup"));
+}
+#endif
 
 //---------------- GPS + GSM (Using Mega Hardware Serials) ----------------
 
@@ -280,6 +323,8 @@ void triggerAlertDisplay(const String &msg) {
 
 void setup() {
   Serial.begin(9600);
+  Serial.setTimeout(50); // Fast non-blocking timeout for readStringUntil to prevent loop freezes
+  printBootReason();
   GPS_SERIAL.begin(9600);
   GSM_SERIAL.begin(9600);
 
@@ -352,11 +397,14 @@ void setup() {
   Serial.println("[pH] Initialized");
   Serial.println("[GPS] Initialized");
   Serial.println("[GSM] Initialized");
+  load_cell.begin(HX711_DOUT_PIN, HX711_SCK_PIN);
+  Serial.println("[HX711] Initialized");
 }
 
 void loop() {
   // Update non-blocking GSM SMS transmission
   updateGSM(millis());
+  load_cell.update(millis());
 
   // ---------- ADXL345 Continuous Sampling (~25Hz / 40ms) & Auto-Reconnection ----------
   static unsigned long last_adxl_probe = 0;
@@ -631,7 +679,7 @@ void loop() {
     last_data_sent = millis();
 
     // 1. Update LCD
-    static bool show_page_1 = true;
+    static int lcd_page = 0;
     lcd_showing_waiting = false;
     lcd.clear();
     lcd.setCursor(0, 0);
@@ -643,12 +691,14 @@ void loop() {
     bool temp_ok  = dht_valid && (!isnan(temperature)) && (temperature >= -10.0f && temperature <= 60.0f);
     bool ph_ok    = ph_valid && (ph_value >= 0.0f && ph_value <= 14.0f);
     bool ldr_ok   = ldr_valid && (ldrValue >= 0 && ldrValue <= 1023);
+    bool weight_ok = load_cell.isValid();
 
     if (millis() < lcd_alert_until && lcd_alert_msg.length() > 0) {
       lcd.print(F("! HEALTH ALERT !"));
       lcd.setCursor(0, 1);
       lcd.print(lcd_alert_msg);
-    } else if (show_page_1) {
+    } else if (lcd_page == 0) {
+      // Page 0: Vitals
       lcd.print(F("S:"));
       if (spo2_ok && displaySpO2 > 0) lcd.print(displaySpO2);
       else lcd.print(F("N/A"));
@@ -675,8 +725,27 @@ void loop() {
         lcd.print(dispLdr);
       }
       else lcd.print(F("N/A"));
-      show_page_1 = !show_page_1;
+      lcd_page = 1;
+    } else if (lcd_page == 1) {
+      // Page 1: Weight & Scale Status
+      lcd.print(F("WT:"));
+      if (weight_ok && !isnan(load_cell.getWeightKg())) {
+        lcd.print(load_cell.getWeightKg(), 1);
+        lcd.print(F("kg "));
+        lcd.print(load_cell.isStable() ? F("STB") : F("UNS"));
+      } else {
+        lcd.print(F("N/A "));
+        lcd.print(load_cell.getStatusString());
+      }
+
+      lcd.setCursor(0, 1);
+      lcd.print(F("Cal:"));
+      lcd.print(load_cell.isCalibrated() ? F("YES") : F("NO"));
+      lcd.print(F(" Raw:"));
+      lcd.print(load_cell.getRawValue());
+      lcd_page = 2;
     } else {
+      // Page 2: Movement
       lcd.print(F("Steps:"));
       lcd.print(step_counter.steps_today);
       lcd.print(F(" Tot:"));
@@ -692,7 +761,7 @@ void loop() {
       lcd.print(F(" Z:"));
       if (accel_ok) lcd.print(zValue, 1);
       else lcd.print(F("N/A"));
-      show_page_1 = !show_page_1;
+      lcd_page = 0;
     }
 
     // 2. Build Standardized JSON Telemetry with Checksum
@@ -740,9 +809,11 @@ void loop() {
     cp.print(F("\"heart_rate_valid\":")); cp.print(hr_ok ? F("true,") : F("false,"));
     cp.print(F("\"bpm_valid\":")); cp.print(hr_ok ? F("true,") : F("false,"));
     if (hr_ok) {
+      cp.print(F("\"heart_rate\":")); cp.print(displayBPM); cp.print(F(","));
       cp.print(F("\"heart_rate_bpm\":")); cp.print(displayBPM); cp.print(F(","));
       cp.print(F("\"bpm\":")); cp.print(displayBPM); cp.print(F(","));
     } else {
+      cp.print(F("\"heart_rate\":null,"));
       cp.print(F("\"heart_rate_bpm\":null,"));
       cp.print(F("\"bpm\":null,"));
     }
@@ -809,6 +880,25 @@ void loop() {
     } else {
       cp.print(F("\"gps_satellites\":null"));
     }
+
+    // Weight Sensor (Load Cell + HX711)
+    weight_ok = load_cell.isValid();
+    cp.print(F(",\"weight_valid\":")); cp.print(weight_ok ? F("true,") : F("false,"));
+    cp.print(F("\"weight_stable\":")); cp.print(load_cell.isStable() ? F("true,") : F("false,"));
+    cp.print(F("\"weight_calibrated\":")); cp.print(load_cell.isCalibrated() ? F("true,") : F("false,"));
+    cp.print(F("\"weight_sensor_status\":\"")); cp.print(load_cell.getStatusString()); cp.print(F("\","));
+    if (load_cell.isConnected()) {
+      cp.print(F("\"weight_raw\":")); cp.print(load_cell.getRawValue()); cp.print(F(","));
+    } else {
+      cp.print(F("\"weight_raw\":null,"));
+    }
+    if (weight_ok && !isnan(load_cell.getWeightKg())) {
+      cp.print(F("\"body_weight_kg\":")); cp.print(load_cell.getWeightKg(), 2); cp.print(F(","));
+      cp.print(F("\"weight_kg\":")); cp.print(load_cell.getWeightKg(), 2);
+    } else {
+      cp.print(F("\"body_weight_kg\":null,"));
+      cp.print(F("\"weight_kg\":null"));
+    }
     
     // Checksum of all preceding bytes
     Serial.print(F(",\"chk\":"));
@@ -845,6 +935,32 @@ void loop() {
           Serial.println(F("[pH] Calibration updated and saved to EEPROM"));
         } else {
           Serial.println(F("[pH] Calibration failed: invalid voltages"));
+        }
+      }
+    } else if (data.startsWith("TARE_WEIGHT") || data.equals("TARE")) {
+      if (load_cell.tare()) {
+        Serial.println(F("{\"event\":\"weight_tare\",\"status\":\"ok\"}"));
+      } else {
+        Serial.println(F("{\"event\":\"weight_tare\",\"status\":\"error\",\"message\":\"sensor_disconnected\"}"));
+      }
+    } else if (data.startsWith("CAL_WEIGHT:")) {
+      float ref_kg = data.substring(11).toFloat();
+      if (load_cell.calibrateWithReference(ref_kg)) {
+        Serial.println(F("{\"event\":\"weight_calibrate\",\"status\":\"ok\"}"));
+      } else {
+        Serial.println(F("{\"event\":\"weight_calibrate\",\"status\":\"error\",\"message\":\"calibration_failed\"}"));
+      }
+    } else if (data.startsWith("SET_WEIGHT_CAL:")) {
+      int comma = data.indexOf(',');
+      if (comma != -1) {
+        long offset = data.substring(15, comma).toInt();
+        float factor = data.substring(comma + 1).toFloat();
+        if (factor > 0.0001f) {
+          load_cell.calibration.tare_offset = offset;
+          load_cell.calibration.cal_factor = factor;
+          load_cell.is_calibrated = true;
+          load_cell.saveCalibration();
+          Serial.println(F("{\"event\":\"set_weight_cal\",\"status\":\"ok\"}"));
         }
       }
     } else if (data.indexOf("a") != -1 && data.indexOf("b") != -1) {

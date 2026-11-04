@@ -6,11 +6,14 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 
 class WebSocketManager {
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .pingInterval(15, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
     private var webSocket: WebSocket? = null
     private var currentUrl: String? = null
     private var currentListener: WebSocketListener? = null
     private var isConnected = false
+    private var reconnectAttempt = 0
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private val reconnectRunnable = Runnable { reconnect() }
 
@@ -26,9 +29,15 @@ class WebSocketManager {
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
                 isConnected = true
+                reconnectAttempt = 0
                 currentListener?.onOpen(webSocket, response)
             }
             override fun onMessage(webSocket: WebSocket, text: String) {
+                val trimmed = text.trim()
+                if (trimmed == "ping" || trimmed == "{\"message\":\"ping\"}") {
+                    webSocket.send("pong")
+                    return
+                }
                 currentListener?.onMessage(webSocket, text)
             }
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -49,7 +58,9 @@ class WebSocketManager {
 
     private fun scheduleReconnect() {
         handler.removeCallbacks(reconnectRunnable)
-        handler.postDelayed(reconnectRunnable, 5000)
+        val delayMs = minOf(30_000L, 1000L * (1L shl minOf(reconnectAttempt, 5)))
+        reconnectAttempt++
+        handler.postDelayed(reconnectRunnable, delayMs)
     }
 
     private fun reconnect() {

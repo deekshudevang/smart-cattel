@@ -49,6 +49,8 @@ class SerialManager:
         self.port: Optional[str] = None
         self.device_info: Optional[Dict[str, Any]] = None
         self.connected = False
+        self.connect_time: Optional[datetime] = None
+        self.last_line_time: Optional[datetime] = None
         self.last_packet: Optional[datetime] = None
         self.packets_received = 0
         self.packets_rejected = 0
@@ -155,14 +157,15 @@ class SerialManager:
         self.state = ConnectionState.CONNECTING
         try:
             self.ser = serial.Serial(self.port, self.baudrate, timeout=1)
-            # Explicitly toggle DTR to reset Arduino
-            self.ser.setDTR(False)
-            time.sleep(0.1)
-            self.ser.setDTR(True)
-            self.ser.setRTS(True)
+            # Avoid toggling DTR aggressively to prevent resetting the MCU on every connect
+            try:
+                self.ser.dtr = True
+                self.ser.rts = True
+            except Exception:
+                pass
             
-            # Wait for arduino reset, but check if we're shutting down
-            for _ in range(10):
+            # Wait briefly for serial stream to settle, checking if we're shutting down
+            for _ in range(4):
                 if self._thread is not None and not self.running:
                     self.ser.close()
                     self.ser = None
@@ -175,24 +178,30 @@ class SerialManager:
             self.last_error = None
             self.state = ConnectionState.CONNECTED
             self.backoff_time = 1.0  # Reset backoff on successful connect
-            logger.info(f"Connected successfully to {self.port}")
+            self.connect_time = datetime.now()
+            logger.info(
+                f"[SERIAL CONNECTED] timestamp={self.connect_time.isoformat()} "
+                f"port={self.port} baud={self.baudrate} "
+                f"hwid={self.device_info.get('hwid') if self.device_info else 'n/a'}"
+            )
             return True
         except serial.SerialException as e:
             self.errors += 1
             error_str = str(e)
             if "Access is denied" in error_str or "PermissionError" in error_str:
                 self.last_error = "SERIAL_PORT_IN_USE"
-                logger.error(f"Access denied to {self.port}. Is another program using it?")
+                logger.error(f"[SERIAL ERROR] timestamp={datetime.now().isoformat()} Access denied to {self.port}. Is another program using it?")
             else:
                 self.last_error = "CONNECTION_FAILED"
-                logger.error(f"Failed to connect to {self.port}: {e}")
+                logger.error(f"[SERIAL ERROR] timestamp={datetime.now().isoformat()} Failed to connect to {self.port}: {e}")
             self.connected = False
             self.ser = None
             self.state = ConnectionState.ERROR
             return False
 
-    def disconnect(self):
+    def disconnect(self, reason: str = "normal"):
         """Disconnect from the Arduino."""
+        was_connected = self.connected
         self.connected = False
         self.paused = True
         self.state = ConnectionState.DISCONNECTED
@@ -200,19 +209,26 @@ class SerialManager:
             try:
                 self.ser.close()
             except Exception as e:
-                logger.error(f"Error while closing serial port: {e}")
+                logger.error(f"[SERIAL CLOSE ERROR] timestamp={datetime.now().isoformat()} Error closing serial port: {e}")
         self.ser = None
+        now = datetime.now()
+        duration_s = (now - self.connect_time).total_seconds() if self.connect_time and was_connected else 0.0
+        self.connect_time = None
         if self.port:
-            logger.info(f"Disconnected from Arduino on {self.port}.")
+            logger.info(
+                f"[SERIAL DISCONNECTED] timestamp={now.isoformat()} "
+                f"port={self.port} reason={reason} duration_s={duration_s:.1f} reconnects={self.reconnect_count}"
+            )
 
     def reconnect(self):
-        """Disconnect and reconnect."""
-        logger.info(f"Attempting to reconnect to {self.port}...")
+        """Disconnect and reconnect with exponential backoff."""
+        now = datetime.now()
+        logger.info(f"[SERIAL RECONNECT] timestamp={now.isoformat()} port={self.port} attempt={self.reconnect_count + 1} backoff={self.backoff_time}s")
         self.reconnect_count += 1
-        self.disconnect()
+        self.disconnect(reason="reconnect")
         
-        # Sleep for 2 seconds, checking if we should stop
-        for _ in range(10):
+        # Sleep for 1 second before attempting re-connect
+        for _ in range(5):
             if not getattr(self, 'running', True):
                 return
             time.sleep(0.2)
@@ -239,7 +255,7 @@ class SerialManager:
         self.running = False
         if self._thread:
             self._thread.join(timeout=3.0)
-        self.disconnect()
+        self.disconnect(reason="shutdown")
         logger.info("SerialManager stopped.")
 
     def write(self, data: str):
@@ -251,14 +267,14 @@ class SerialManager:
                 self.ser.write(data.encode('utf-8'))
             except serial.SerialTimeoutException:
                 self.errors += 1
-                logger.error("Timeout writing to serial.")
+                logger.error("[SERIAL WRITE TIMEOUT] Timeout writing to serial.")
             except serial.SerialException as e:
                 self.errors += 1
-                logger.error(f"Failed to write to serial: {e}")
+                logger.error(f"[SERIAL WRITE ERROR] Failed to write to serial: {e}")
                 self.reconnect()
             except Exception as e:
                 self.errors += 1
-                logger.error(f"Unexpected write error: {e}")
+                logger.error(f"[SERIAL WRITE UNEXPECTED] Unexpected write error: {e}")
 
     def read_loop(self):
         """Background loop to read from the Arduino."""
@@ -271,7 +287,7 @@ class SerialManager:
                 continue
                 
             if not self.connected or not self.ser:
-                logger.info(f"Waiting {self.backoff_time}s before reconnecting (State: {self.state.value})...")
+                logger.info(f"[SERIAL WAIT RECONNECT] timestamp={datetime.now().isoformat()} Waiting {self.backoff_time}s (State: {self.state.value})...")
                 sleep_time = self.backoff_time
                 slept = 0.0
                 while slept < sleep_time:
@@ -298,8 +314,20 @@ class SerialManager:
 
                 now = time.time()
                 if now - self.last_diag_time > 5.0:
-                    logger.info(f"[DIAG] Port: {self.port} | Bytes Rx: {self.bytes_received} | Lines: {self.lines_received} | Parse OK: {self.packets_received} | Parse Fail: {self.packets_rejected} | Buffer: {len(self.raw_buffer)}")
+                    last_time_str = self.last_line_time.isoformat() if self.last_line_time else "never"
+                    logger.info(
+                        f"[SERIAL HEARTBEAT] timestamp={datetime.now().isoformat()} "
+                        f"port={self.port} last_rx_line={last_time_str} "
+                        f"lines={self.lines_received} bytes={self.bytes_received} "
+                        f"rx_ok={self.packets_received} rx_reject={self.packets_rejected} "
+                        f"buf_len={len(self.raw_buffer)}"
+                    )
                     self.last_diag_time = now
+
+                # Protect against unbounded buffer growth if no newline received
+                if len(self.raw_buffer) > 16384:
+                    logger.warning(f"[SERIAL BUFFER OVERFLOW] raw_buffer exceeded 16KB ({len(self.raw_buffer)} bytes) without newline. Resetting buffer.")
+                    self.raw_buffer.clear()
 
                 while b'\n' in self.raw_buffer:
                     line_bytes, self.raw_buffer = self.raw_buffer.split(b'\n', 1)
@@ -309,6 +337,7 @@ class SerialManager:
                         continue
 
                     self.lines_received += 1
+                    self.last_line_time = datetime.now()
 
                     if line.startswith('{'):
                         logger.debug(f"[SERIAL RAW]\n{line}")
@@ -327,25 +356,32 @@ class SerialManager:
                                     pkt_dict["is_simulated"] = False
                                     pkt_dict["raw_packet"] = line
                                     pkt_dict["checksum_valid"] = True
-                                    self.on_data_callback(pkt_dict)
+                                    try:
+                                        self.on_data_callback(pkt_dict)
+                                    except Exception as cb_err:
+                                        logger.error(f"[SERIAL CALLBACK ERROR] timestamp={datetime.now().isoformat()} error={cb_err}", exc_info=True)
                             else:
                                 self.packets_rejected += 1
-                                logger.warning(f"Packet rejected ({reason}): {line}")
+                                logger.warning(f"[SERIAL PARSE REJECTED] timestamp={datetime.now().isoformat()} reason={reason} line={line[:100]}")
 
-                        except json.JSONDecodeError:
+                        except json.JSONDecodeError as jde:
                             self.packets_rejected += 1
                             self.errors += 1
-                            logger.warning(f"Invalid JSON received: {line}")
+                            logger.warning(f"[SERIAL PARSE ERROR] timestamp={datetime.now().isoformat()} error={jde} line={line[:100]}")
+                        except Exception as parse_err:
+                            self.packets_rejected += 1
+                            self.errors += 1
+                            logger.error(f"[SERIAL PARSE EXCEPTION] timestamp={datetime.now().isoformat()} error={parse_err} line={line[:100]}", exc_info=True)
                     else:
-                        logger.info(f"[{self.port} BOOT/INFO] {line}")
+                        logger.info(f"[SERIAL BOOT/INFO] timestamp={datetime.now().isoformat()} [{self.port}] {line}")
 
             except serial.SerialException as e:
                 self.errors += 1
-                logger.error(f"Serial connection lost: {e}")
+                logger.error(f"[SERIAL ERROR] timestamp={datetime.now().isoformat()} Connection lost on {self.port}: {e}")
                 self.connected = False
             except Exception as e:
                 self.errors += 1
-                logger.error(f"Unexpected error in read loop: {e}")
+                logger.error(f"[SERIAL UNEXPECTED] timestamp={datetime.now().isoformat()} Loop error: {e}", exc_info=True)
                 time.sleep(1)
 
     def get_status(self) -> Dict[str, Any]:
@@ -358,6 +394,9 @@ class SerialManager:
             "connected": self.connected,
             "paused": self.paused,
             "last_packet": self.last_packet.isoformat() if self.last_packet else None,
+            "last_line_time": self.last_line_time.isoformat() if self.last_line_time else None,
+            "connect_time": self.connect_time.isoformat() if self.connect_time else None,
+            "backoff_time": self.backoff_time,
             "packets_received": self.packets_received,
             "packets_rejected": self.packets_rejected,
             "reconnect_count": self.reconnect_count,

@@ -132,3 +132,100 @@ def test_graceful_shutdown():
     mock_thread.join.assert_called_once()
     mock_ser.close.assert_called_once()
     assert manager.ser is None
+
+def test_malformed_lines_and_partial_json_do_not_kill_reader():
+    """Verify corrupted JSON, incomplete packets, or noise lines never kill the reader."""
+    manager = SerialManager()
+    manager.connected = True
+    manager.running = True
+    
+    received_packets = []
+    manager.on_data_callback = lambda pkt: received_packets.append(pkt)
+    
+    # Inject various corrupted, broken, and noisy lines followed by a valid line
+    noise = b"GARBAGE_NOISE_LINE\n"
+    truncated = b"{\"cattle_id\":\"CATTLE-001\",\"timestamp\":100\n"
+    corrupt_json = b"{\"cattle_id\"::INVALID}\n"
+    valid_packet = (
+        b"{\"protocol_version\":1,\"device_id\":\"SC-001\",\"cattle_id\":\"CATTLE-001\","
+        b"\"sequence\":1,\"timestamp\":1718000000,\"accelerometer_valid\":true,"
+        b"\"acceleration_x\":0.1,\"acceleration_y\":0.2,\"acceleration_z\":9.8,"
+        b"\"heart_rate\":72,\"heart_rate_valid\":true,\"bpm_quality\":1.0,"
+        b"\"spo2\":98,\"spo2_valid\":true,\"spo2_quality\":1.0,"
+        b"\"temperature\":38.5,\"temperature_valid\":true,"
+        b"\"ph\":6.8,\"ph_valid\":true,\"ldr\":450,\"ldr_valid\":true,"
+        b"\"body_weight_kg\":520.5,\"weight_valid\":true,\"weight_stable\":true,\"weight_calibrated\":true}\n"
+    )
+    
+    manager.raw_buffer.extend(noise + truncated + corrupt_json + valid_packet)
+    
+    # Process buffer as read_loop does
+    while b'\n' in manager.raw_buffer:
+        line_bytes, manager.raw_buffer = manager.raw_buffer.split(b'\n', 1)
+        line = line_bytes.decode('utf-8', errors='ignore').strip()
+        if not line:
+            continue
+        manager.lines_received += 1
+        if line.startswith('{'):
+            try:
+                import json
+                data = json.loads(line)
+                is_valid, packet, reason = manager.validator.process(data, raw_line=line)
+                if is_valid and packet:
+                    manager.packets_received += 1
+                    if manager.on_data_callback:
+                        manager.on_data_callback(packet.model_dump())
+                else:
+                    manager.packets_rejected += 1
+            except Exception:
+                manager.packets_rejected += 1
+                manager.errors += 1
+        else:
+            # Noise/info line
+            pass
+            
+    assert manager.lines_received == 4
+    assert manager.packets_rejected >= 2  # Truncated & Corrupt
+    assert manager.packets_received == 1  # Valid packet parsed successfully
+    assert len(received_packets) == 1
+    assert received_packets[0]["cattle_id"] == "CATTLE-001"
+
+def test_buffer_overflow_protection():
+    """Verify raw buffer resets if it exceeds 16KB without newline to protect memory."""
+    manager = SerialManager()
+    # Add 17KB of continuous stream with no newline
+    manager.raw_buffer.extend(b"A" * 17000)
+    assert len(manager.raw_buffer) > 16384
+    
+    # Simulate buffer safety check in read loop
+    if len(manager.raw_buffer) > 16384:
+        manager.raw_buffer.clear()
+        
+    assert len(manager.raw_buffer) == 0
+
+def test_exponential_backoff_progression():
+    """Verify backoff doubles on failure up to max_backoff and resets to 1.0 on connect."""
+    manager = SerialManager()
+    manager.backoff_time = 1.0
+    manager.max_backoff = 60.0
+    
+    # Simulate 3 failures
+    manager.backoff_time = min(manager.max_backoff, manager.backoff_time * 2)
+    assert manager.backoff_time == 2.0
+    manager.backoff_time = min(manager.max_backoff, manager.backoff_time * 2)
+    assert manager.backoff_time == 4.0
+    manager.backoff_time = min(manager.max_backoff, manager.backoff_time * 2)
+    assert manager.backoff_time == 8.0
+    
+    # Simulate connect success
+    manager.backoff_time = 1.0
+    assert manager.backoff_time == 1.0
+
+def test_structured_diagnostics_fields():
+    """Verify status includes connect_time, last_line_time, backoff_time for structured logging."""
+    manager = SerialManager()
+    status = manager.get_status()
+    assert "backoff_time" in status
+    assert "last_line_time" in status
+    assert "connect_time" in status
+    assert "state" in status

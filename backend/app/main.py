@@ -1,11 +1,13 @@
 import sys
 import os
 import json
+import uuid
 import asyncio
 import threading
 import time
 import random
 import logging
+from datetime import datetime, timezone
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -25,7 +27,7 @@ from services import SensorService, PredictionService
 from schemas.websocket import WebSocketEvent
 import redis.asyncio as redis_async
 from auth import get_current_user, require_admin
-from routers import analytics, calibration, cattle, devices
+from routers import analytics, calibration, cattle, devices, weight
 from app.serial.manager import SerialManager
 
 serial_manager = SerialManager()
@@ -49,6 +51,7 @@ app.include_router(analytics.router)
 app.include_router(calibration.router)
 app.include_router(cattle.router)
 app.include_router(devices.router)
+app.include_router(weight.router)
 
 # CORS
 app.add_middleware(
@@ -199,6 +202,8 @@ def health_check(request: Request):
 @app.get("/api/diagnostics/hardware")
 def hardware_diagnostics():
     status = serial_manager.get_status()
+    is_busy = status.get("error_detail") == "SERIAL_PORT_IN_USE"
+    status_message = "Serial port busy" if is_busy else ("Connected" if status.get("connected") else "Disconnected")
     return {
         "serial_connected": status.get("connected", False),
         "port": status.get("port"),
@@ -208,12 +213,16 @@ def hardware_diagnostics():
         "packets_rejected": status.get("packets_rejected", 0),
         "reconnect_count": status.get("reconnect_count", 0),
         "errors": status.get("errors", 0),
-        "last_packet_timestamp": status.get("last_packet")
+        "last_packet_timestamp": status.get("last_packet"),
+        "serial_busy": is_busy,
+        "status_message": status_message
     }
 
 @app.get("/api/arduino/status")
 def get_arduino_status():
     status = serial_manager.get_status()
+    is_busy = status.get("error_detail") == "SERIAL_PORT_IN_USE"
+    status_message = "Serial port busy" if is_busy else ("Connected" if status.get("connected") else "Disconnected")
     return {
         "mode": "direct",
         "connected": status.get("connected", False),
@@ -221,7 +230,9 @@ def get_arduino_status():
         "device": status.get("device"),
         "last_data": status.get("last_packet"),
         "simulation_enabled": False,
-        "error": status.get("error_detail")
+        "error": status.get("error_detail"),
+        "serial_busy": is_busy,
+        "status_message": status_message
     }
 
 @app.post("/api/arduino/disconnect")
@@ -304,6 +315,12 @@ def get_cows(include_simulated: bool = False, db: Session = Depends(get_db)):
                 "humidity": reading.humidity if reading else None,
                 "ph": reading.ph if reading else None,
                 "ldr": reading.ldr if reading else None,
+                "body_weight_kg": reading.body_weight_kg if (reading and reading.body_weight_kg is not None) else (c.weight if c else None),
+                "weight_raw": reading.weight_raw if reading else None,
+                "weight_stable": reading.weight_stable if reading else False,
+                "weight_calibrated": reading.weight_calibrated if reading else False,
+                "weight_valid": reading.weight_valid if reading else (True if c and c.weight else False),
+                "weight_sensor_status": reading.weight_sensor_status if reading else ("stable" if c and c.weight else "disconnected"),
                 "step_count_today": reading.step_count_today if reading else (latest_act.steps if latest_act else None),
                 "step_count_lifetime": reading.step_count_lifetime if reading else None,
                 "acceleration_x": reading.acceleration_x if reading else None,
@@ -382,6 +399,12 @@ def get_cow(cattle_id: str, include_simulated: bool = False, db: Session = Depen
             "humidity": reading.humidity if reading else None,
             "ph": reading.ph if reading else None,
             "ldr": reading.ldr if reading else None,
+            "body_weight_kg": reading.body_weight_kg if (reading and reading.body_weight_kg is not None) else (c.weight if c else None),
+            "weight_raw": reading.weight_raw if reading else None,
+            "weight_stable": reading.weight_stable if reading else False,
+            "weight_calibrated": reading.weight_calibrated if reading else False,
+            "weight_valid": reading.weight_valid if reading else (True if c and c.weight else False),
+            "weight_sensor_status": reading.weight_sensor_status if reading else ("stable" if c and c.weight else "disconnected"),
             "step_count_today": reading.step_count_today if reading else (latest_act.steps if latest_act else None),
             "step_count_lifetime": reading.step_count_lifetime if reading else None,
             "acceleration_x": reading.acceleration_x if reading else None,
@@ -745,14 +768,24 @@ async def general_websocket_endpoint(websocket: WebSocket, client_id: str = Quer
     try:
         while True:
             data = await websocket.receive_text()
-            if data == "pong" or "pong" in data:
+            if "ping" in data:
+                if client_id in manager.active_connections:
+                    manager.active_connections[client_id].update_last_seen()
+                pong_event = WebSocketEvent(
+                    event_id=str(uuid.uuid4()),
+                    event_type="heartbeat",
+                    timestamp=datetime.now(timezone.utc),
+                    payload={"message": "pong"}
+                )
+                await websocket.send_text(pong_event.model_dump_json())
+            elif "pong" in data:
                 if client_id in manager.active_connections:
                     manager.active_connections[client_id].update_last_seen()
             elif data.startswith("subscribe:"):
                 new_cattle = data.split(":")[1]
                 manager.subscribe(client_id, new_cattle)
     except WebSocketDisconnect:
-        manager.disconnect(client_id)
+        manager.disconnect(client_id, reason="client_disconnect")
 
 @app.websocket("/ws/cattle/{cattle_id}")
 async def websocket_endpoint(websocket: WebSocket, cattle_id: str, client_id: str = Query(None), reconnect: bool = Query(False)):
@@ -763,14 +796,24 @@ async def websocket_endpoint(websocket: WebSocket, cattle_id: str, client_id: st
     try:
         while True:
             data = await websocket.receive_text()
-            if data == "pong" or "pong" in data:
+            if "ping" in data:
+                if actual_client_id in manager.active_connections:
+                    manager.active_connections[actual_client_id].update_last_seen()
+                pong_event = WebSocketEvent(
+                    event_id=str(uuid.uuid4()),
+                    event_type="heartbeat",
+                    timestamp=datetime.now(timezone.utc),
+                    payload={"message": "pong"}
+                )
+                await websocket.send_text(pong_event.model_dump_json())
+            elif "pong" in data:
                 if actual_client_id in manager.active_connections:
                     manager.active_connections[actual_client_id].update_last_seen()
             elif data.startswith("subscribe:"):
                 new_cattle = data.split(":")[1]
                 manager.subscribe(actual_client_id, new_cattle)
     except WebSocketDisconnect:
-        manager.disconnect(actual_client_id)
+        manager.disconnect(actual_client_id, reason="client_disconnect")
 
 @app.websocket("/ws/dashboard")
 async def dashboard_websocket_endpoint(websocket: WebSocket, client_id: str = Query(None), reconnect: bool = Query(False)):
@@ -780,11 +823,21 @@ async def dashboard_websocket_endpoint(websocket: WebSocket, client_id: str = Qu
     try:
         while True:
             data = await websocket.receive_text()
-            if data == "pong" or "pong" in data:
+            if "ping" in data:
+                if actual_client_id in manager.active_connections:
+                    manager.active_connections[actual_client_id].update_last_seen()
+                pong_event = WebSocketEvent(
+                    event_id=str(uuid.uuid4()),
+                    event_type="heartbeat",
+                    timestamp=datetime.now(timezone.utc),
+                    payload={"message": "pong"}
+                )
+                await websocket.send_text(pong_event.model_dump_json())
+            elif "pong" in data:
                 if actual_client_id in manager.active_connections:
                     manager.active_connections[actual_client_id].update_last_seen()
     except WebSocketDisconnect:
-        manager.disconnect(actual_client_id)
+        manager.disconnect(actual_client_id, reason="client_disconnect")
 
 if __name__ == "__main__":
     import uvicorn

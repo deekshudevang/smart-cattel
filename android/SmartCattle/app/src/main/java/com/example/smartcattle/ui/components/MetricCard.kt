@@ -62,12 +62,12 @@ fun MetricCard(
         modifier = finalCardModifier,
         shape = MaterialTheme.shapes.medium,
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            containerColor = MaterialTheme.colorScheme.surface
         ),
         border = CardDefaults.outlinedCardBorder().copy(
             brush = androidx.compose.ui.graphics.SolidColor(
-                if (isValid) MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
-                else MaterialTheme.colorScheme.outline.copy(alpha = 0.1f)
+                if (isValid) MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
             )
         )
     ) {
@@ -90,16 +90,16 @@ fun MetricCard(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(32.dp)
+                            .size(28.dp)
                             .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)),
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = icon,
                             contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                     Text(
@@ -114,19 +114,30 @@ fun MetricCard(
 
                 if (!statusText.isNullOrBlank()) {
                     Spacer(Modifier.width(spacing.xxs))
-                    Text(
-                        text = statusText.uppercase(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = resolvedStatusColor,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                    val formattedStatus = statusText.lowercase().replaceFirstChar { it.uppercase() }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                         modifier = Modifier
                             .clip(CircleShape)
-                            .background(resolvedStatusColor.copy(alpha = 0.12f))
-                            .border(1.dp, resolvedStatusColor.copy(alpha = 0.35f), CircleShape)
-                            .padding(horizontal = spacing.xs, vertical = spacing.xxs)
-                    )
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(resolvedStatusColor)
+                        )
+                        Text(
+                            text = formattedStatus,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
 
@@ -143,8 +154,10 @@ fun MetricCard(
                 ) {
                     Text(
                         text = currentValue,
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.headlineMedium.copy(
+                            fontFeatureSettings = "tnum"
+                        ),
+                        fontWeight = FontWeight.SemiBold,
                         color = if (isValid) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -154,7 +167,7 @@ fun MetricCard(
                         Text(
                             text = currentUnit,
                             style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Medium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(bottom = 3.dp),
                             maxLines = 1,

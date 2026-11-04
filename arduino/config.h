@@ -10,4 +10,8 @@
 #define GPS_GSM_TX 52
 #define SMS_PHONE_NUMBER "+1234567890"
 
+// HX711 Load Cell Pin Configuration (Arduino Mega 2560 safe GPIOs)
+#define HX711_DOUT_PIN 44
+#define HX711_SCK_PIN 46
+
 #endif

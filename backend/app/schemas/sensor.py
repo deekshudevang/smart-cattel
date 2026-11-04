@@ -44,3 +44,18 @@ class SensorDataSchema(BaseModel):
 
     ldr: Optional[int] = None
     ldr_valid: bool = False
+
+    # Weight / Load Cell
+    body_weight_kg: Optional[float] = None
+    weight_raw: Optional[int] = None
+    weight_stable: bool = False
+    weight_calibrated: bool = False
+    weight_valid: bool = False
+    weight_sensor_status: Optional[str] = "disconnected"
+
+    @field_validator('body_weight_kg')
+    @classmethod
+    def check_weight(cls, v):
+        if v is not None and not (0.0 <= v <= 1500.0):
+            raise ValueError('Body weight must be between 0.0 and 1500.0 kg')
+        return v

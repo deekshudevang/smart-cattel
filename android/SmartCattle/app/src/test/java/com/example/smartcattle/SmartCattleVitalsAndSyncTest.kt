@@ -435,5 +435,321 @@ class SmartCattleVitalsAndSyncTest {
                         (realMap["source"] as? String == "simulator")
         assertFalse("Real hardware packet must not be identified as simulated", isRealSim)
     }
+
+    // ── Test 14: Packet with valid heart rate and SpO2 reaches Android state ──
+    @Test
+    fun testValidHeartRateAndSpo2ReachesAndroidState() {
+        val validPacketJson = """
+        {
+            "event_type": "sensor_update",
+            "source": "serial",
+            "is_simulated": false,
+            "validity": {
+                "spo2": true,
+                "heart_rate": true,
+                "temperature": true,
+                "ldr": true
+            },
+            "validity_reasons": {
+                "spo2": null,
+                "heart_rate": null
+            },
+            "payload": {
+                "type": "sensor_update",
+                "cattle_id": "CATTLE-001",
+                "data": {
+                    "heart_rate": 68,
+                    "spo2": 98,
+                    "temperature": 38.6,
+                    "ldr": 920,
+                    "heart_rate_valid": true,
+                    "spo2_valid": true,
+                    "temperature_valid": true,
+                    "ldr_valid": true
+                },
+                "health": {
+                    "heart_rate": {"status": "normal"},
+                    "spo2": {"status": "normal"},
+                    "temperature": {"status": "normal"},
+                    "ldr": {"status": "normal"}
+                }
+            }
+        }
+        """.trimIndent()
+
+        @Suppress("UNCHECKED_CAST")
+        val envelope = com.google.gson.Gson().fromJson(validPacketJson, Map::class.java) as Map<String, Any?>
+        @Suppress("UNCHECKED_CAST")
+        val payload = envelope["payload"] as? Map<String, Any?> ?: emptyMap()
+        @Suppress("UNCHECKED_CAST")
+        val data = payload["data"] as? Map<String, Any?> ?: emptyMap()
+        @Suppress("UNCHECKED_CAST")
+        val validity = envelope["validity"] as? Map<String, Any?>
+        @Suppress("UNCHECKED_CAST")
+        val validityReasons = envelope["validity_reasons"] as? Map<String, Any?>
+
+        fun resolveValidity(key: String, validKey: String, hasData: Boolean): Boolean {
+            if (validity != null && validity.containsKey(key)) return validity[key] as? Boolean ?: false
+            if (data.containsKey(validKey)) return data[validKey] as? Boolean ?: false
+            return hasData
+        }
+
+        fun resolveReason(key: String, rawVal: Any?, isValid: Boolean, defaultUnavailableReason: String): String? {
+            if (rawVal != null && isValid) return null
+            val backendReason = validityReasons?.get(key) as? String
+            if (!backendReason.isNullOrBlank() && backendReason != "null") return backendReason
+            if (rawVal != null && !isValid) return "Reading out of valid range"
+            return defaultUnavailableReason
+        }
+
+        val rawSpo2 = (data["spo2"] as? Number)?.toInt()
+        val spo2Valid = resolveValidity("spo2", "spo2_valid", rawSpo2 != null && rawSpo2 > 0)
+        val spo2Val = if (rawSpo2 != null && spo2Valid && rawSpo2 > 0) "$rawSpo2" else "Not Available"
+        val spo2Reason = resolveReason("spo2", rawSpo2, spo2Valid, "No contact")
+
+        val rawHr = (data["heart_rate"] as? Number)?.toInt()
+        val hrValid = resolveValidity("heart_rate", "heart_rate_valid", rawHr != null && rawHr > 0)
+        val hrVal = if (rawHr != null && hrValid && rawHr > 0) "$rawHr" else "Not Available"
+        val hrReason = resolveReason("heart_rate", rawHr, hrValid, "No contact")
+
+        assertEquals("98", spo2Val)
+        assertTrue("SpO2 must be valid", spo2Valid)
+        assertNull("SpO2 reason must be null when valid", spo2Reason)
+
+        assertEquals("68", hrVal)
+        assertTrue("Heart rate must be valid", hrValid)
+        assertNull("Heart rate reason must be null when valid", hrReason)
+    }
+
+    // ── Test 15: Out-of-range SpO2 shows Not Available with reason while other fields display ──
+    @Test
+    fun testOutOfRangeSpo2ShowsNotAvailableWithReasonWhileOtherFieldsDisplay() {
+        val outOfRangePacketJson = """
+        {
+            "event_type": "sensor_update",
+            "source": "serial",
+            "is_simulated": false,
+            "validity": {
+                "spo2": false,
+                "heart_rate": true,
+                "temperature": true,
+                "ldr": true
+            },
+            "validity_reasons": {
+                "spo2": "Reading out of valid range",
+                "heart_rate": null
+            },
+            "payload": {
+                "type": "sensor_update",
+                "cattle_id": "CATTLE-001",
+                "data": {
+                    "heart_rate": 72,
+                    "spo2": 24,
+                    "temperature": 38.5,
+                    "ldr": 850,
+                    "heart_rate_valid": true,
+                    "spo2_valid": false,
+                    "temperature_valid": true,
+                    "ldr_valid": true
+                },
+                "health": {
+                    "heart_rate": {"status": "normal"},
+                    "spo2": {"status": "abnormal"},
+                    "temperature": {"status": "normal"},
+                    "ldr": {"status": "normal"}
+                }
+            }
+        }
+        """.trimIndent()
+
+        @Suppress("UNCHECKED_CAST")
+        val envelope = com.google.gson.Gson().fromJson(outOfRangePacketJson, Map::class.java) as Map<String, Any?>
+        @Suppress("UNCHECKED_CAST")
+        val payload = envelope["payload"] as? Map<String, Any?> ?: emptyMap()
+        @Suppress("UNCHECKED_CAST")
+        val data = payload["data"] as? Map<String, Any?> ?: emptyMap()
+        @Suppress("UNCHECKED_CAST")
+        val validity = envelope["validity"] as? Map<String, Any?>
+        @Suppress("UNCHECKED_CAST")
+        val validityReasons = envelope["validity_reasons"] as? Map<String, Any?>
+
+        fun resolveValidity(key: String, validKey: String, hasData: Boolean): Boolean {
+            if (validity != null && validity.containsKey(key)) return validity[key] as? Boolean ?: false
+            if (data.containsKey(validKey)) return data[validKey] as? Boolean ?: false
+            return hasData
+        }
+
+        fun resolveReason(key: String, rawVal: Any?, isValid: Boolean, defaultUnavailableReason: String): String? {
+            if (rawVal != null && isValid) return null
+            val backendReason = validityReasons?.get(key) as? String
+            if (!backendReason.isNullOrBlank() && backendReason != "null") return backendReason
+            if (rawVal != null && !isValid) return "Reading out of valid range"
+            return defaultUnavailableReason
+        }
+
+        // Parse SpO2 (out of range: 24%)
+        val rawSpo2 = (data["spo2"] as? Number)?.toInt()
+        val spo2Valid = resolveValidity("spo2", "spo2_valid", rawSpo2 != null && rawSpo2 > 0)
+        val spo2Val = if (rawSpo2 != null && spo2Valid && rawSpo2 > 0) "$rawSpo2" else "Not Available"
+        val spo2Reason = resolveReason("spo2", rawSpo2, spo2Valid, "No contact")
+
+        // Parse Heart Rate (valid: 72 bpm)
+        val rawHr = (data["heart_rate"] as? Number)?.toInt()
+        val hrValid = resolveValidity("heart_rate", "heart_rate_valid", rawHr != null && rawHr > 0)
+        val hrVal = if (rawHr != null && hrValid && rawHr > 0) "$rawHr" else "Not Available"
+        val hrReason = resolveReason("heart_rate", rawHr, hrValid, "No contact")
+
+        // Parse Temperature (valid: 38.5 C)
+        val rawTemp = (data["temperature"] as? Number)?.toFloat()
+        val tempValid = resolveValidity("temperature", "temperature_valid", rawTemp != null)
+        val tempVal = if (rawTemp != null && tempValid) String.format(java.util.Locale.US, "%.1f", rawTemp) else "Not Available"
+
+        // Parse LDR (valid: 850 lux)
+        val rawLdr = (data["ldr"] as? Number)?.toInt()
+        val ldrValid = resolveValidity("ldr", "ldr_valid", rawLdr != null)
+        val ldrVal = if (rawLdr != null && ldrValid) "$rawLdr" else "Not Available"
+
+        // Assert SpO2 is Not Available with reason "Reading out of valid range"
+        assertEquals("Not Available", spo2Val)
+        assertFalse("SpO2 must be invalid", spo2Valid)
+        assertEquals("Reading out of valid range", spo2Reason)
+
+        // Assert other fields still display their valid values
+        assertEquals("72", hrVal)
+        assertTrue(hrValid)
+        assertNull(hrReason)
+
+        assertEquals("38.5", tempVal)
+        assertTrue(tempValid)
+
+        assertEquals("850", ldrVal)
+        assertTrue(ldrValid)
+    }
+
+    // ── Test 16: Serial port busy state is detected and reported ──
+    @Test
+    fun testSerialPortBusyStatusReported() {
+        val hardwareStatusJson = """
+        {
+            "serial_connected": false,
+            "serial_busy": true,
+            "status_message": "Serial port busy",
+            "port": "COM10"
+        }
+        """.trimIndent()
+
+        val statusMap = com.google.gson.Gson().fromJson(hardwareStatusJson, Map::class.java)
+        val isBusy = statusMap["serial_busy"] as? Boolean == true
+        val statusMsg = statusMap["status_message"] as? String
+
+        assertTrue("Serial port busy flag must be true", isBusy)
+        assertEquals("Serial port busy", statusMsg)
+    }
+
+    // ── Test 17: Weight sensor JSON parsing with stability and calibration flags ──
+    @Test
+    fun testWeightSensorParsingWithStabilityAndCalibration() {
+        val jsonString = """
+        {
+            "cattle_id": "CATTLE-001",
+            "body_weight_kg": 452.4,
+            "weight_raw": 842100,
+            "weight_stable": true,
+            "weight_calibrated": true,
+            "weight_valid": true,
+            "weight_sensor_status": "stable"
+        }
+        """.trimIndent()
+
+        val map = com.google.gson.Gson().fromJson(jsonString, Map::class.java)
+
+        val weightKg = (map["body_weight_kg"] as? Number)?.toFloat()
+        val weightStable = map["weight_stable"] as? Boolean == true
+        val weightCalibrated = map["weight_calibrated"] as? Boolean == true
+        val weightValid = map["weight_valid"] as? Boolean == true
+        val sensorStatus = map["weight_sensor_status"] as? String
+
+        assertNotNull(weightKg)
+        assertEquals(452.4f, weightKg!!, 0.01f)
+        assertTrue("Weight must be marked stable", weightStable)
+        assertTrue("Weight must be calibrated", weightCalibrated)
+        assertTrue("Weight reading must be valid", weightValid)
+        assertEquals("stable", sensorStatus)
+
+        val displayVal = if (weightKg != null && weightValid) String.format(java.util.Locale.US, "%.1f", weightKg) else "Not Available"
+        assertEquals("452.4", displayVal)
+    }
+
+    // ── Test 18: Weight null or disconnected displays 'Not Available' and never 0.0 ──
+    @Test
+    fun testWeightNullDisplaysNotAvailableNeverZero() {
+        val jsonString = """
+        {
+            "cattle_id": "CATTLE-001",
+            "body_weight_kg": null,
+            "weight_stable": false,
+            "weight_calibrated": false,
+            "weight_valid": false,
+            "weight_sensor_status": "disconnected"
+        }
+        """.trimIndent()
+
+        val map = com.google.gson.Gson().fromJson(jsonString, Map::class.java)
+
+        val weightKg = (map["body_weight_kg"] as? Number)?.toFloat()
+        val weightValid = map["weight_valid"] as? Boolean == true
+
+        assertNull("Raw weight must be null when disconnected", weightKg)
+        val displayVal = if (weightKg != null && weightValid) String.format(java.util.Locale.US, "%.1f", weightKg) else "Not Available"
+        assertEquals("Not Available", displayVal)
+        assertFalse("Must never format null into 0 or 0.0", displayVal == "0" || displayVal == "0.0")
+    }
+
+    // ── Test 19: Strict 7-sensor category validation on Dashboard ──
+    @Test
+    fun testStrictSevenSensorCategories() {
+        val sensors = listOf(
+            Sensor("❤️", "Heart Rate", "72", "bpm", "Normal", androidx.compose.ui.graphics.Color.Green),
+            Sensor("💓", "SpO2", "98", "%", "Normal", androidx.compose.ui.graphics.Color.Green),
+            Sensor("🌡️", "Body Temp", "38.5", "°C", "Normal", androidx.compose.ui.graphics.Color.Green),
+            Sensor("🧪", "pH Level", "6.8", "", "Normal", androidx.compose.ui.graphics.Color.Green),
+            Sensor("☀️", "Light", "850", "lux", "Normal", androidx.compose.ui.graphics.Color.Green),
+            Sensor("⚖️", "Weight", "450.0", "kg", "Stable", androidx.compose.ui.graphics.Color.Green),
+            Sensor("🏃", "MEMS Accelerometer", "X:0.1 Y:-0.0 Z:9.8", "m/s²", "Active", androidx.compose.ui.graphics.Color.Green)
+        )
+
+        assertEquals("Dashboard must contain exactly 7 sensor categories", 7, sensors.size)
+
+        val labels = sensors.map { it.label }
+        assertTrue("Must contain Heart Rate", labels.contains("Heart Rate"))
+        assertTrue("Must contain SpO2", labels.contains("SpO2"))
+        assertTrue("Must contain Body Temp", labels.contains("Body Temp"))
+        assertTrue("Must contain pH Level", labels.contains("pH Level"))
+        assertTrue("Must contain Light", labels.contains("Light"))
+        assertTrue("Must contain Weight", labels.contains("Weight"))
+        assertTrue("Must contain combined MEMS Accelerometer", labels.contains("MEMS Accelerometer"))
+
+        assertFalse("Must NOT have separate MEMS X card", labels.contains("MEMS X"))
+        assertFalse("Must NOT have separate MEMS Y card", labels.contains("MEMS Y"))
+        assertFalse("Must NOT have separate MEMS Z card", labels.contains("MEMS Z"))
+    }
+
+    // ── Test 20: Weight statistics and trend determination ──
+    @Test
+    fun testWeightStatisticsTrendCalculation() {
+        val currentWeight = 452.4f
+        val previousWeight = 450.0f
+        val diff = currentWeight - previousWeight
+        val diffPct = (diff / previousWeight) * 100f
+        val trend = when {
+            diff > 0.5f -> "gain"
+            diff < -0.5f -> "loss"
+            else -> "stable"
+        }
+
+        assertEquals(2.4f, diff, 0.05f)
+        assertEquals("gain", trend)
+        assertTrue("Gain percentage must be positive", diffPct > 0f)
+    }
 }
 

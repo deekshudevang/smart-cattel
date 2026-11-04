@@ -59,6 +59,7 @@ import com.example.smartcattle.data.local.toCowProfile
 import com.example.smartcattle.data.local.toEntity
 import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -126,7 +127,13 @@ data class Cattle(
     val isSimulated: Boolean = false,
     val isStale: Boolean = false,
     val lastPacketTime: Long = System.currentTimeMillis(),
-    val lastUpdateFormatted: String? = null
+    val lastUpdateFormatted: String? = null,
+    val memsX: Float? = null,
+    val memsY: Float? = null,
+    val memsZ: Float? = null,
+    val fallDetected: Boolean = false,
+    val weightStable: Boolean = false,
+    val weightCalibrated: Boolean = false
 )
 data class Alert(val cattle: String, val msg: String, val time: String, val tag: String, val color: Color)
 
@@ -152,6 +159,8 @@ data class CowProfile(
     val latestAccelX: Float? = null,
     val latestAccelY: Float? = null,
     val latestAccelZ: Float? = null,
+    val latestWeight: Float? = null,
+    val latestWeightStable: Boolean = false,
     val overallStatus: String? = null,
     val latestTimestamp: String? = null,
     // latest milk/feed/activity
@@ -188,7 +197,13 @@ data class ApiLatest(
     val source: String? = null,
     val is_simulated: Boolean? = null,
     val raw_packet: String? = null,
-    val checksum_valid: Boolean? = null
+    val checksum_valid: Boolean? = null,
+    val body_weight_kg: Float? = null,
+    val weight_raw: Int? = null,
+    val weight_stable: Boolean? = null,
+    val weight_calibrated: Boolean? = null,
+    val weight_valid: Boolean? = null,
+    val weight_sensor_status: String? = null
 )
 data class ApiHistoryRow(
     val timestamp: String,
@@ -209,7 +224,9 @@ data class ApiHistoryRow(
     val ldr_valid: Boolean? = null,
     val device_connected: Boolean? = null,
     val source: String? = null,
-    val is_simulated: Boolean? = null
+    val is_simulated: Boolean? = null,
+    val body_weight_kg: Float? = null,
+    val weight_stable: Boolean? = null
 )
 data class ApiAlert(val cattle_id: String, val cattle_name: String, val timestamp: String, val fall_detected: Boolean, val details: List<String>)
 
@@ -240,6 +257,7 @@ data class ApiCowProfile(
     val age: String?,
     val gender: String?,
     val dob: String?,
+    val weight: Float? = null,
     val notes: String?,
     val status: String?,
     val latest_health: ApiLatestHealth?,
@@ -269,11 +287,25 @@ data class ApiLatestHealth(
     val ph_valid: Boolean? = null,
     val ldr_valid: Boolean? = null,
     val source: String? = null,
-    val is_simulated: Boolean? = null
+    val is_simulated: Boolean? = null,
+    val body_weight_kg: Float? = null,
+    val weight_stable: Boolean? = null,
+    val weight_calibrated: Boolean? = null,
+    val weight_valid: Boolean? = null,
+    val weight_sensor_status: String? = null
 )
 data class ApiLatestMilk(val quantity: Float?, val unit: String?, val date: String?)
 data class ApiLatestFeed(val quantity: Float?, val unit: String?, val date: String?)
 data class ApiLatestActivity(val steps: Int?, val date: String?)
+
+data class ApiArduinoStatus(
+    val mode: String? = null,
+    val connected: Boolean = false,
+    val port: String? = null,
+    val serial_busy: Boolean = false,
+    val status_message: String? = null,
+    val error: String? = null
+)
 
 interface ApiService {
     @GET("api/cattle")
@@ -294,6 +326,21 @@ interface ApiService {
     suspend fun updateCow(@Path("id") id: String, @Body body: CowUpdateBody): ApiCowProfile
     @DELETE("api/cows/{id}")
     suspend fun deleteCow(@Path("id") id: String): retrofit2.Response<Unit>
+    @GET("api/arduino/status")
+    suspend fun getArduinoStatus(): ApiArduinoStatus
+    // Weight endpoints
+    @GET("api/v1/cattle/{id}/weight/latest")
+    suspend fun getLatestWeight(@Path("id") id: String): com.example.smartcattle.data.model.WeightReading
+    @GET("api/v1/cattle/{id}/weight/history")
+    suspend fun getWeightHistory(@Path("id") id: String, @Query("limit") limit: Int = 50): List<com.example.smartcattle.data.model.WeightReading>
+    @GET("api/v1/cattle/{id}/weight/statistics")
+    suspend fun getWeightStatistics(@Path("id") id: String): com.example.smartcattle.data.model.WeightStatistics
+    @POST("api/v1/sensors/weight")
+    suspend fun recordWeight(@Body req: com.example.smartcattle.data.model.WeightRecordRequest): com.example.smartcattle.data.model.WeightReading
+    @POST("api/v1/sensors/weight/tare")
+    suspend fun tareScale(@Body req: com.example.smartcattle.data.model.TareRequest = com.example.smartcattle.data.model.TareRequest()): retrofit2.Response<Unit>
+    @POST("api/v1/sensors/weight/calibrate")
+    suspend fun calibrateScale(@Body req: com.example.smartcattle.data.model.CalibrateRequest): retrofit2.Response<Unit>
 }
 
 // ── ViewModel ──
@@ -320,6 +367,35 @@ class CattleViewModel : ViewModel() {
     private val _cowError = MutableStateFlow<String?>(null)
     val cowError: StateFlow<String?> = _cowError.asStateFlow()
 
+    private val _serialBusy = MutableStateFlow(false)
+    val serialBusy: StateFlow<Boolean> = _serialBusy.asStateFlow()
+
+    private val _serialStatusMessage = MutableStateFlow<String?>("Disconnected")
+    val serialStatusMessage: StateFlow<String?> = _serialStatusMessage.asStateFlow()
+
+    // Weight & Scale states
+    private val _liveWeight = MutableStateFlow<Float?>(null)
+    val liveWeight: StateFlow<Float?> = _liveWeight.asStateFlow()
+
+    private val _liveWeightStable = MutableStateFlow(false)
+    val liveWeightStable: StateFlow<Boolean> = _liveWeightStable.asStateFlow()
+
+    private val _liveWeightCalibrated = MutableStateFlow(false)
+    val liveWeightCalibrated: StateFlow<Boolean> = _liveWeightCalibrated.asStateFlow()
+
+    private val _liveWeightStatus = MutableStateFlow("disconnected")
+    val liveWeightStatus: StateFlow<String> = _liveWeightStatus.asStateFlow()
+
+    private val _weightStats = MutableStateFlow<com.example.smartcattle.data.model.WeightStatistics?>(null)
+    val weightStats: StateFlow<com.example.smartcattle.data.model.WeightStatistics?> = _weightStats.asStateFlow()
+
+    private val _weightHistory = MutableStateFlow<List<com.example.smartcattle.data.model.WeightReading>>(emptyList())
+    val weightHistory: StateFlow<List<com.example.smartcattle.data.model.WeightReading>> = _weightHistory.asStateFlow()
+
+    private val _isWeightActionLoading = MutableStateFlow(false)
+    val isWeightActionLoading: StateFlow<Boolean> = _isWeightActionLoading.asStateFlow()
+
+
     private var currentIp: String = BuildConfig.DEV_LAN_IP
     private val deletedCattleIds = mutableSetOf<String>()
     private var cowDao: com.example.smartcattle.data.local.CowDao? = null
@@ -329,14 +405,24 @@ class CattleViewModel : ViewModel() {
 
     private var api: ApiService? = null
     private var webSocket: WebSocket? = null
+    private var reconnectAttempt = 0
+    private var reconnectJob: Job? = null
     private val client = OkHttpClient.Builder()
-        .pingInterval(30, java.util.concurrent.TimeUnit.SECONDS)
+        .pingInterval(15, java.util.concurrent.TimeUnit.SECONDS)
         .build()
 
     init {
         viewModelScope.launch {
             while (true) {
                 delay(2000)
+                try {
+                    val status = api?.getArduinoStatus()
+                    if (status != null) {
+                        _serialBusy.value = status.serial_busy
+                        _serialStatusMessage.value = status.status_message
+                    }
+                } catch (_: Exception) {}
+
                 val now = System.currentTimeMillis()
                 val currentList = _cattle.value
                 var changed = false
@@ -345,9 +431,12 @@ class CattleViewModel : ViewModel() {
                         changed = true
                         c.copy(
                             isStale = true,
-                            dataSource = "Disconnected",
+                            dataSource = if (_serialBusy.value) "Serial port busy" else "Disconnected",
                             sensors = c.sensors.map { s ->
-                                s.copy(isValid = false, reason = "Disconnected (>10s timeout)")
+                                s.copy(
+                                    isValid = false,
+                                    reason = if (_serialBusy.value) "Serial port busy" else "Disconnected (>10s timeout)"
+                                )
                             }
                         )
                     } else {
@@ -379,19 +468,24 @@ class CattleViewModel : ViewModel() {
                             age = p.age ?: "Not Available",
                             overall = p.overallStatus ?: "Healthy",
                             sensors = listOf(
-                                Sensor("💓", "SpO2", p.latestSpo2?.let { "$it" } ?: "Not Available", "%", "Normal", Green, isValid = p.latestSpo2 != null, reason = if (p.latestSpo2 == null) "Sensor not connected" else null),
-                                Sensor("❤️", "Heart Rate", p.latestHeartRate?.let { "$it" } ?: "Not Available", "bpm", "Normal", Green, isValid = p.latestHeartRate != null, reason = if (p.latestHeartRate == null) "No contact" else null),
-                                Sensor("🌡️", "Body Temp", p.latestTemp?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available", "°C", "Normal", Green, isValid = p.latestTemp != null, reason = if (p.latestTemp == null) "Sensor not connected" else null),
-                                Sensor("🧪", "pH Level", p.latestPh?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available", "", "Normal", Green, isValid = p.latestPh != null, reason = if (p.latestPh == null) "Probe not in solution" else null),
-                                Sensor("☀️", "Light", p.latestLdr?.let { "$it" } ?: "Not Available", "lux", "Normal", Green, isValid = p.latestLdr != null, reason = if (p.latestLdr == null) "Sensor not connected" else null),
-                                Sensor("👟", "Steps Today", p.latestStepsToday?.toString() ?: "Not Available", "steps", "Cached", Green, isValid = p.latestStepsToday != null, reason = if (p.latestStepsToday == null) "No activity data" else null),
-                                Sensor("📊", "Total Steps", p.latestStepsLifetime?.toString() ?: "Not Available", "steps", "Lifetime", Blue, isValid = p.latestStepsLifetime != null, reason = if (p.latestStepsLifetime == null) "No activity data" else null),
-                                Sensor("🏃", "Acceleration", "Not Available", "m/s²", "Cached", Green, isValid = false, reason = "Sensor not connected")
+                                Sensor("hr", "Heart Rate", p.latestHeartRate?.let { "$it" } ?: "Not Available", "bpm", "Normal", Green, isValid = p.latestHeartRate != null, reason = if (p.latestHeartRate == null) "No contact" else null),
+                                Sensor("spo2", "SpO2", p.latestSpo2?.let { "$it" } ?: "Not Available", "%", "Normal", Green, isValid = p.latestSpo2 != null, reason = if (p.latestSpo2 == null) "Sensor not connected" else null),
+                                Sensor("temp", "Body Temp", p.latestTemp?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available", "°C", "Normal", Green, isValid = p.latestTemp != null, reason = if (p.latestTemp == null) "Sensor not connected" else null),
+                                Sensor("ph", "pH Level", p.latestPh?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available", "", "Normal", Green, isValid = p.latestPh != null, reason = if (p.latestPh == null) "Probe not in solution" else null),
+                                Sensor("ldr", "Light", p.latestLdr?.let { "$it" } ?: "Not Available", "lux", "Normal", Green, isValid = p.latestLdr != null, reason = if (p.latestLdr == null) "Sensor not connected" else null),
+                                Sensor("weight", "Weight", p.latestWeight?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available", "kg", "Cached", Green, isValid = p.latestWeight != null, reason = if (p.latestWeight == null) "Sensor not connected" else null),
+                                Sensor("mems", "MEMS Accelerometer", if (p.latestAccelX != null && p.latestAccelY != null && p.latestAccelZ != null) String.format(Locale.US, "X:%.1f Y:%.1f Z:%.1f", p.latestAccelX, p.latestAccelY, p.latestAccelZ) else "Not Available", "m/s²", "Cached", Green, isValid = p.latestAccelX != null, reason = if (p.latestAccelX == null) "Sensor not connected" else null)
                             ),
                             dataSource = "Cached",
                             isSimulated = false,
                             isStale = true,
-                            lastUpdateFormatted = p.latestTimestamp
+                            lastUpdateFormatted = p.latestTimestamp,
+                            memsX = p.latestAccelX,
+                            memsY = p.latestAccelY,
+                            memsZ = p.latestAccelZ,
+                            fallDetected = false,
+                            weightStable = p.latestWeightStable,
+                            weightCalibrated = true
                         )
                     }
                 }
@@ -610,37 +704,46 @@ class CattleViewModel : ViewModel() {
         } else if (r.mems_x != null && accelValid) {
             String.format(Locale.US, "%.2f", r.mems_x)
         } else "Not Available"
+        val accelReason = if (!accelValid) "Sensor not connected" else null
 
         val spo2Valid = r.spo2_valid ?: (r.spo2 != null && r.spo2 > 0)
         val spo2Val = if (r.spo2 != null && spo2Valid && r.spo2 > 0) "${r.spo2}" else "Not Available"
+        val spo2Reason = if (r.spo2 != null && !spo2Valid) "Reading out of valid range" else if (spo2Val == "Not Available") "No contact" else null
 
         val hrValid = r.heart_rate_valid ?: (r.heart_rate != null && r.heart_rate > 0)
         val hrVal = if (r.heart_rate != null && hrValid && r.heart_rate > 0) "${r.heart_rate}" else "Not Available"
+        val hrReason = if (r.heart_rate != null && !hrValid) "Reading out of valid range" else if (hrVal == "Not Available") "No contact" else null
 
         val tempValid = r.temperature_valid ?: (r.temperature != null)
         val tempVal = if (r.temperature != null && tempValid) String.format(Locale.US, "%.1f", r.temperature) else "Not Available"
+        val tempReason = if (r.temperature != null && !tempValid) "Reading out of valid range" else if (tempVal == "Not Available") "Sensor not connected" else null
 
         val phValid = r.ph_valid ?: (r.ph != null)
         val phVal = if (r.ph != null && phValid) String.format(Locale.US, "%.1f", r.ph) else "Not Available"
+        val phReason = if (r.ph != null && !phValid) "Reading out of valid range" else if (phVal == "Not Available") "Probe not in solution" else null
 
         val ldrValid = r.ldr_valid ?: (r.ldr != null)
         val ldrVal = if (r.ldr != null && ldrValid) "${r.ldr}" else "Not Available"
+        val ldrReason = if (r.ldr != null && !ldrValid) "Reading out of valid range" else if (ldrVal == "Not Available") "Sensor not connected" else null
 
-        val stepsTodayVal = r.step_count_today?.toString() ?: "Not Available"
-        val stepsLifetimeVal = r.step_count_lifetime?.toString() ?: "Not Available"
+        val wValid = r.weight_valid ?: (r.body_weight_kg != null)
+        val weightVal = if (r.body_weight_kg != null && wValid) String.format(Locale.US, "%.1f", r.body_weight_kg) else "Not Available"
+        val weightReason = if (r.body_weight_kg != null && !wValid) "Reading out of valid range" else if (weightVal == "Not Available") "Sensor not connected" else null
+        val weightStable = r.weight_stable ?: false
+        val weightStatus = if (weightVal == "Not Available") "Offline" else if (weightStable) "Stable" else "Stabilizing"
+        val weightColor = if (weightVal == "Not Available") Grey else if (weightStable) Green else Orange
 
         val isSimulated = r.is_simulated ?: false
         val dataSource = if (isSimulated) "Simulated" else "Live from sensor"
 
         val sensors = listOf(
-            Sensor("💓", "SpO2", spo2Val, "%", sStatus(r.health.spo2), sColor(r.health.spo2), isValid = spo2Val != "Not Available", reason = if (spo2Val == "Not Available") "No contact" else null),
-            Sensor("❤️", "Heart Rate", hrVal, "bpm", sStatus(r.health.heart_rate), sColor(r.health.heart_rate), isValid = hrVal != "Not Available", reason = if (hrVal == "Not Available") "No contact" else null),
-            Sensor("🌡️", "Body Temp", tempVal, "°C", sStatus(r.health.temperature), sColor(r.health.temperature), isValid = tempVal != "Not Available", reason = if (tempVal == "Not Available") "Sensor not connected" else null),
-            Sensor("🧪", "pH Level", phVal, "", sStatus(r.health.ph), sColor(r.health.ph), isValid = phVal != "Not Available", reason = if (phVal == "Not Available") "Probe not in solution" else null),
-            Sensor("☀️", "Light", ldrVal, "lux", sStatus(r.health.ldr), sColor(r.health.ldr), isValid = ldrVal != "Not Available", reason = if (ldrVal == "Not Available") "Sensor not connected" else null),
-            Sensor("👟", "Steps Today", stepsTodayVal, "steps", if (!accelValid) "Sensor Offline" else "Active", if (!accelValid) Orange else Green, isValid = stepsTodayVal != "Not Available", reason = if (stepsTodayVal == "Not Available") "No activity data" else null),
-            Sensor("📊", "Total Steps", stepsLifetimeVal, "steps", "Lifetime", Blue, isValid = stepsLifetimeVal != "Not Available", reason = if (stepsLifetimeVal == "Not Available") "No activity data" else null),
-            Sensor("🏃", "Acceleration", accelStr, "m/s²", if (fallDetected) "Fall Detected" else sStatus(r.health.mems), if (fallDetected) Red else sColor(r.health.mems), isValid = accelStr != "Not Available", reason = if (accelStr == "Not Available") "Sensor not connected" else null)
+            Sensor("hr", "Heart Rate", hrVal, "bpm", sStatus(r.health.heart_rate), sColor(r.health.heart_rate), isValid = hrVal != "Not Available", reason = hrReason),
+            Sensor("spo2", "SpO2", spo2Val, "%", sStatus(r.health.spo2), sColor(r.health.spo2), isValid = spo2Val != "Not Available", reason = spo2Reason),
+            Sensor("temp", "Body Temp", tempVal, "°C", sStatus(r.health.temperature), sColor(r.health.temperature), isValid = tempVal != "Not Available", reason = tempReason),
+            Sensor("ph", "pH Level", phVal, "", sStatus(r.health.ph), sColor(r.health.ph), isValid = phVal != "Not Available", reason = phReason),
+            Sensor("ldr", "Light", ldrVal, "lux", sStatus(r.health.ldr), sColor(r.health.ldr), isValid = ldrVal != "Not Available", reason = ldrReason),
+            Sensor("weight", "Weight", weightVal, "kg", weightStatus, weightColor, isValid = weightVal != "Not Available", reason = weightReason),
+            Sensor("mems", "MEMS Accelerometer", accelStr, "m/s²", if (fallDetected) "Fall Detected" else sStatus(r.health.mems), if (fallDetected) Red else sColor(r.health.mems), isValid = accelStr != "Not Available", reason = accelReason)
         )
         val overall = if (r.health.overall == "abnormal") "At Risk" else "Healthy"
         return Cattle(
@@ -654,7 +757,13 @@ class CattleViewModel : ViewModel() {
             isSimulated = isSimulated,
             isStale = false,
             lastPacketTime = System.currentTimeMillis(),
-            lastUpdateFormatted = r.timestamp.take(19)
+            lastUpdateFormatted = r.timestamp.take(19),
+            memsX = r.acceleration_x ?: r.mems_x,
+            memsY = r.acceleration_y ?: r.mems_y,
+            memsZ = r.acceleration_z ?: r.mems_z,
+            fallDetected = fallDetected,
+            weightStable = weightStable,
+            weightCalibrated = r.weight_calibrated ?: false
         )
     }
 
@@ -668,8 +777,8 @@ class CattleViewModel : ViewModel() {
                     r.temperature?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available",
                     r.humidity?.let { String.format(Locale.US, "%.0f", it) } ?: "Not Available",
                     r.ph?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available",
-                    if (r.fall_detected) "🚨" else "",
-                    if (r.health.overall == "normal") "✓" else "⚠")
+                    if (r.fall_detected) "FALL" else "",
+                    if (r.health.overall == "normal") "OK" else "WARN")
             }
             _history.value = histRows.take(20)
         } catch (e: Exception) { e.printStackTrace() }
@@ -687,16 +796,100 @@ class CattleViewModel : ViewModel() {
         } catch (e: Exception) { e.printStackTrace() }
     }
 
+    fun fetchWeightData(cattleId: String) {
+        viewModelScope.launch {
+            try {
+                val stats = api?.getWeightStatistics(cattleId)
+                _weightStats.value = stats
+                val hist = api?.getWeightHistory(cattleId, limit = 50) ?: emptyList()
+                _weightHistory.value = hist
+            } catch (e: Exception) {
+                android.util.Log.e("SmartCattle", "Failed to fetch weight data: ${e.message}")
+            }
+        }
+    }
+
+    fun recordWeightMeasurement(cattleId: String, weightKg: Float, onDone: (Boolean, String?) -> Unit) {
+        viewModelScope.launch {
+            _isWeightActionLoading.value = true
+            try {
+                val req = com.example.smartcattle.data.model.WeightRecordRequest(
+                    cattle_id = cattleId,
+                    weight_kg = weightKg,
+                    is_stable = _liveWeightStable.value,
+                    is_calibrated = _liveWeightCalibrated.value,
+                    source = "scale"
+                )
+                val res = api?.recordWeight(req)
+                if (res != null) {
+                    fetchWeightData(cattleId)
+                    fetchCows()
+                    onDone(true, "Confirmed: ${res.weight_kg} kg recorded for $cattleId")
+                } else {
+                    onDone(false, "No response from server")
+                }
+            } catch (e: Exception) {
+                onDone(false, e.message ?: "Failed to record weight")
+            } finally {
+                _isWeightActionLoading.value = false
+            }
+        }
+    }
+
+    fun tareScale(onDone: (Boolean, String?) -> Unit) {
+        viewModelScope.launch {
+            _isWeightActionLoading.value = true
+            try {
+                val resp = api?.tareScale()
+                if (resp != null && resp.isSuccessful) {
+                    onDone(true, "Scale tare command sent to hardware")
+                } else {
+                    onDone(false, "Failed to tare scale (HTTP ${resp?.code()})")
+                }
+            } catch (e: Exception) {
+                onDone(false, e.message ?: "Failed to send tare command")
+            } finally {
+                _isWeightActionLoading.value = false
+            }
+        }
+    }
+
+    fun calibrateScale(refKg: Float, onDone: (Boolean, String?) -> Unit) {
+        viewModelScope.launch {
+            _isWeightActionLoading.value = true
+            try {
+                val req = com.example.smartcattle.data.model.CalibrateRequest(reference_weight_kg = refKg)
+                val resp = api?.calibrateScale(req)
+                if (resp != null && resp.isSuccessful) {
+                    onDone(true, "Calibration command ($refKg kg) sent to hardware")
+                } else {
+                    onDone(false, "Failed to calibrate scale (HTTP ${resp?.code()})")
+                }
+            } catch (e: Exception) {
+                onDone(false, e.message ?: "Failed to calibrate scale")
+            } finally {
+                _isWeightActionLoading.value = false
+            }
+        }
+    }
+
     private fun connectWebSocket(url: String) {
         val request = Request.Builder().url(url).build()
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
                 viewModelScope.launch(Dispatchers.Main) {
                     _isConnected.value = true
+                    reconnectAttempt = 0
+                    reconnectJob?.cancel()
                     android.util.Log.i("SmartCattle", "[ANDROID WS] OPEN → connected=true")
                 }
             }
             override fun onMessage(webSocket: WebSocket, text: String) {
+                val trimmed = text.trim()
+                if (trimmed == "ping" || trimmed == "{\"message\":\"ping\"}") {
+                    webSocket.send("pong")
+                    return
+                }
                 viewModelScope.launch(Dispatchers.Main) {
                     android.util.Log.d("SmartCattle", "[ANDROID WS MESSAGE] $text")
                     try {
@@ -727,7 +920,8 @@ class CattleViewModel : ViewModel() {
 
                             val data = json.getJSONObject("data")
                             val health = json.optJSONObject("health") ?: JSONObject()
-                            val validity = envelope.optJSONObject("validity") ?: json.optJSONObject("validity")
+                            val validity = envelope.optJSONObject("validity") ?: json.optJSONObject("validity") ?: data.optJSONObject("validity")
+                            val validityReasons = envelope.optJSONObject("validity_reasons") ?: json.optJSONObject("validity_reasons") ?: data.optJSONObject("validity_reasons")
                             val source = envelope.optString("source", json.optString("source", "serial"))
                             val isSimulated = envelope.optBoolean("is_simulated", json.optBoolean("is_simulated", false))
                             val overallStatus = health.optString("overall", "normal")
@@ -754,62 +948,86 @@ class CattleViewModel : ViewModel() {
                                 return null
                             }
 
+                            fun resolveValidity(key: String, validKey: String, hasData: Boolean): Boolean {
+                                if (validity != null && validity.has(key)) return validity.optBoolean(key)
+                                if (data.has(validKey)) return data.optBoolean(validKey)
+                                return hasData
+                            }
+
+                            fun resolveReason(key: String, rawVal: Any?, isValid: Boolean, defaultUnavailableReason: String): String? {
+                                if (rawVal != null && isValid) return null
+                                val backendReason = validityReasons?.optString(key)?.takeIf { it.isNotBlank() && it != "null" }
+                                if (backendReason != null) return backendReason
+                                if (rawVal != null && !isValid) return "Reading out of valid range"
+                                return defaultUnavailableReason
+                            }
+
                             val existingProfile = activeProfiles.find { it.cattleId == cid }
 
                             // Real hardware readings only - no resurrection of old readings
-                            val spo2Valid = validity?.optBoolean("spo2", true) ?: (!data.isNull("spo2_percent") || !data.isNull("spo2"))
-                            val rawSpo2 = optNullableInt("spo2_percent", "spo2")
+                            val rawSpo2 = optNullableInt("spo2", "spo2_percent")
+                            val spo2Valid = resolveValidity("spo2", "spo2_valid", rawSpo2 != null && rawSpo2 > 0)
                             val spo2Val = if (rawSpo2 != null && spo2Valid && rawSpo2 > 0) "$rawSpo2" else "Not Available"
-                            val spo2Reason = if (spo2Val == "Not Available") "No contact" else null
+                            val spo2Reason = resolveReason("spo2", rawSpo2, spo2Valid, "No contact")
 
-                            val hrValid = validity?.optBoolean("heart_rate", true) ?: (!data.isNull("heart_rate_bpm") || !data.isNull("bpm") || !data.isNull("heart_rate"))
-                            val rawHr = optNullableInt("heart_rate_bpm", "bpm") ?: optNullableInt("heart_rate")
+                            val rawHr = optNullableInt("heart_rate", "bpm") ?: optNullableInt("heart_rate_bpm")
+                            val hrValid = resolveValidity("heart_rate", "heart_rate_valid", rawHr != null && rawHr > 0)
                             val hrVal = if (rawHr != null && hrValid && rawHr > 0) "$rawHr" else "Not Available"
-                            val hrReason = if (hrVal == "Not Available") "No contact" else null
+                            val hrReason = resolveReason("heart_rate", rawHr, hrValid, "No contact")
 
-                            val tempValid = validity?.optBoolean("temperature", true) ?: (!data.isNull("temperature_c") || !data.isNull("temperature"))
-                            val rawTemp = optNullableFloat("temperature_c", "temperature")
+                            val rawTemp = optNullableFloat("temperature", "temperature_c")
+                            val tempValid = resolveValidity("temperature", "temperature_valid", rawTemp != null)
                             val tempVal = if (rawTemp != null && tempValid) String.format(Locale.US, "%.1f", rawTemp) else "Not Available"
-                            val tempReason = if (tempVal == "Not Available") "Sensor not connected" else null
+                            val tempReason = resolveReason("temperature", rawTemp, tempValid, "Sensor not connected")
 
-                            val phValid = validity?.optBoolean("ph", true) ?: (!data.isNull("ph_value") || !data.isNull("ph"))
-                            val rawPh = optNullableFloat("ph_value", "ph")
+                            val rawPh = optNullableFloat("ph", "ph_value")
+                            val phValid = resolveValidity("ph", "ph_valid", rawPh != null)
                             val phVal = if (rawPh != null && phValid) String.format(Locale.US, "%.1f", rawPh) else "Not Available"
-                            val phReason = if (phVal == "Not Available") "Probe not in solution" else null
+                            val phReason = resolveReason("ph", rawPh, phValid, "Probe not in solution")
 
-                            val ldrValid = validity?.optBoolean("ldr", true) ?: (!data.isNull("ldr_value") || !data.isNull("ldr"))
-                            val rawLdr = optNullableInt("ldr_value", "ldr")
+                            val rawLdr = optNullableInt("ldr", "ldr_value")
+                            val ldrValid = resolveValidity("ldr", "ldr_valid", rawLdr != null)
                             val ldrVal = if (rawLdr != null && ldrValid) "$rawLdr" else "Not Available"
-                            val ldrReason = if (ldrVal == "Not Available") "Sensor not connected" else null
+                            val ldrReason = resolveReason("ldr", rawLdr, ldrValid, "Sensor not connected")
+
+                            val rawWeight = optNullableFloat("body_weight_kg", "weight_kg")
+                            val weightValid = resolveValidity("weight", "weight_valid", rawWeight != null)
+                            val weightStable = data.optBoolean("weight_stable", false)
+                            val weightCalibrated = data.optBoolean("weight_calibrated", false)
+                            val weightVal = if (rawWeight != null && weightValid) String.format(Locale.US, "%.1f", rawWeight) else "Not Available"
+                            val weightReason = resolveReason("weight", rawWeight, weightValid, "Sensor disconnected")
+                            val weightStatus = if (weightVal == "Not Available") "Offline" else if (weightStable) "Stable" else "Stabilizing"
+                            val weightColor = if (weightVal == "Not Available") Grey else if (weightStable) Green else Orange
+
+                            _liveWeight.value = rawWeight
+                            _liveWeightStable.value = weightStable
+                            _liveWeightCalibrated.value = weightCalibrated
+                            _liveWeightStatus.value = if (rawWeight == null) "disconnected" else if (weightStable) "stable" else "unstable"
 
                             val rawStepsToday = optNullableInt("step_count_today", "steps_today")
                             val effectiveStepsToday = rawStepsToday ?: existingProfile?.latestStepsToday
                             val stepsTodayVal = effectiveStepsToday?.toString() ?: "Not Available"
-                            val stepsTodayReason = if (stepsTodayVal == "Not Available") "No activity data" else null
 
                             val rawStepsLifetime = optNullableInt("step_count_lifetime", "steps_lifetime")
                             val effectiveStepsLifetime = rawStepsLifetime ?: existingProfile?.latestStepsLifetime
-                            val stepsLifetimeVal = effectiveStepsLifetime?.toString() ?: "Not Available"
-                            val stepsLifetimeReason = if (stepsLifetimeVal == "Not Available") "No activity data" else null
 
-                            val accelValid = validity?.optBoolean("accelerometer", true) ?: if (!data.isNull("accelerometer_valid")) data.optBoolean("accelerometer_valid", true) else true
+                            val accelValid = resolveValidity("accelerometer", "accelerometer_valid", !data.isNull("acceleration_x") || !data.isNull("mems_x"))
                             val rawAccelX = optNullableFloat("acceleration_x", "mems_x")
                             val rawAccelY = optNullableFloat("acceleration_y", "mems_y")
                             val rawAccelZ = optNullableFloat("acceleration_z", "mems_z")
                             val accelStr = if (rawAccelX != null && rawAccelY != null && rawAccelZ != null && accelValid) {
                                 String.format(Locale.US, "X:%.1f Y:%.1f Z:%.1f", rawAccelX, rawAccelY, rawAccelZ)
                             } else "Not Available"
-                            val accelReason = if (accelStr == "Not Available") "Sensor not connected" else null
+                            val accelReason = resolveReason("accelerometer", rawAccelX, accelValid, "Sensor not connected")
 
                             val sensors = listOf(
-                                Sensor("💓", "SpO2", spo2Val, "%", sStatus("spo2"), sColor("spo2"), isValid = spo2Val != "Not Available", reason = spo2Reason),
-                                Sensor("❤️", "Heart Rate", hrVal, "bpm", sStatus("heart_rate"), sColor("heart_rate"), isValid = hrVal != "Not Available", reason = hrReason),
-                                Sensor("🌡️", "Body Temp", tempVal, "°C", sStatus("temperature"), sColor("temperature"), isValid = tempVal != "Not Available", reason = tempReason),
-                                Sensor("🧪", "pH Level", phVal, "", sStatus("ph"), sColor("ph"), isValid = phVal != "Not Available", reason = phReason),
-                                Sensor("☀️", "Light", ldrVal, "lux", sStatus("ldr"), sColor("ldr"), isValid = ldrVal != "Not Available", reason = ldrReason),
-                                Sensor("👟", "Steps Today", stepsTodayVal, "steps", if (!accelValid) "Sensor Offline" else "Active", if (!accelValid) Orange else Green, isValid = stepsTodayVal != "Not Available", reason = stepsTodayReason),
-                                Sensor("📊", "Total Steps", stepsLifetimeVal, "steps", "Lifetime", Blue, isValid = stepsLifetimeVal != "Not Available", reason = stepsLifetimeReason),
-                                Sensor("🏃", "Acceleration", accelStr, "m/s²", memsStatus, memsColor, isValid = accelStr != "Not Available", reason = accelReason)
+                                Sensor("hr", "Heart Rate", hrVal, "bpm", sStatus("heart_rate"), sColor("heart_rate"), isValid = hrVal != "Not Available", reason = hrReason),
+                                Sensor("spo2", "SpO2", spo2Val, "%", sStatus("spo2"), sColor("spo2"), isValid = spo2Val != "Not Available", reason = spo2Reason),
+                                Sensor("temp", "Body Temp", tempVal, "°C", sStatus("temperature"), sColor("temperature"), isValid = tempVal != "Not Available", reason = tempReason),
+                                Sensor("ph", "pH Level", phVal, "", sStatus("ph"), sColor("ph"), isValid = phVal != "Not Available", reason = phReason),
+                                Sensor("ldr", "Light", ldrVal, "lux", sStatus("ldr"), sColor("ldr"), isValid = ldrVal != "Not Available", reason = ldrReason),
+                                Sensor("weight", "Weight", weightVal, "kg", weightStatus, weightColor, isValid = weightVal != "Not Available", reason = weightReason),
+                                Sensor("mems", "MEMS Accelerometer", accelStr, "m/s²", memsStatus, memsColor, isValid = accelStr != "Not Available", reason = accelReason)
                             )
                             val overall = if (overallStatus == "abnormal") "At Risk" else "Healthy"
 
@@ -829,8 +1047,17 @@ class CattleViewModel : ViewModel() {
                                 isSimulated = isSimulated,
                                 isStale = false,
                                 lastPacketTime = System.currentTimeMillis(),
-                                lastUpdateFormatted = t
+                                lastUpdateFormatted = t,
+                                memsX = rawAccelX,
+                                memsY = rawAccelY,
+                                memsZ = rawAccelZ,
+                                fallDetected = fallDetected,
+                                weightStable = weightStable,
+                                weightCalibrated = weightCalibrated
                             )
+
+                            android.util.Log.i("SmartCattle", "[ANDROID WS RAW MESSAGE] $text")
+                            android.util.Log.i("SmartCattle", "[ANDROID WS PARSED DTO] cow=$cid hr=$hrVal spo2=$spo2Val temp=$tempVal ph=$phVal ldr=$ldrVal weight=$weightVal")
 
                             val currentCattle = _cattle.value.filter { activeIds.isEmpty() || activeIds.contains(it.id) }.toMutableList()
                             val idx = currentCattle.indexOfFirst { it.id == cid }
@@ -856,6 +1083,8 @@ class CattleViewModel : ViewModel() {
                                     latestAccelX = if (accelStr != "Not Available") rawAccelX else null,
                                     latestAccelY = if (accelStr != "Not Available") rawAccelY else null,
                                     latestAccelZ = if (accelStr != "Not Available") rawAccelZ else null,
+                                    latestWeight = if (weightVal != "Not Available") rawWeight else existingProfile.latestWeight,
+                                    latestWeightStable = weightStable,
                                     overallStatus = overall,
                                     latestTimestamp = t
                                 )
@@ -867,11 +1096,11 @@ class CattleViewModel : ViewModel() {
                                 }
                             }
 
-                            val fallIcon = if (fallDetected) "🚨" else ""
+                            val fallIcon = if (fallDetected) "FALL" else ""
                             val newRow = listOf(t, spo2Val, hrVal, tempVal,
                                 data.optDouble("humidity", 0.0).let { if (it > 0) String.format(Locale.US, "%.0f", it) else "Not Available" },
                                 phVal, fallIcon,
-                                if (overall == "Healthy") "✓" else "⚠")
+                                if (overall == "Healthy") "OK" else "WARN")
                             _history.value = (_history.value + listOf(newRow)).takeLast(20)
 
                             if (overall == "At Risk") {
@@ -896,16 +1125,29 @@ class CattleViewModel : ViewModel() {
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                _isConnected.value = false; reconnect(url)
+                _isConnected.value = false
+                android.util.Log.w("SmartCattle", "[ANDROID WS CLOSED] code=$code reason=$reason")
+                reconnect(url)
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                _isConnected.value = false; reconnect(url)
+                _isConnected.value = false
+                android.util.Log.e("SmartCattle", "[ANDROID WS FAILURE] error=${t.message}")
+                reconnect(url)
             }
         })
     }
 
     private fun reconnect(url: String) {
-        viewModelScope.launch { delay(5000); if (!_isConnected.value) connectWebSocket(url) }
+        reconnectJob?.cancel()
+        reconnectJob = viewModelScope.launch {
+            val backoffMs = minOf(30_000L, 1000L * (1L shl minOf(reconnectAttempt, 5)))
+            reconnectAttempt++
+            android.util.Log.i("SmartCattle", "[ANDROID WS RECONNECT] Attempt $reconnectAttempt in ${backoffMs}ms to $url")
+            delay(backoffMs)
+            if (!_isConnected.value) {
+                connectWebSocket(url)
+            }
+        }
     }
 }
 
@@ -930,6 +1172,8 @@ private fun ApiCowProfile.toCowProfile(photoPath: String? = null) = CowProfile(
     latestAccelX = latest_health?.acceleration_x,
     latestAccelY = latest_health?.acceleration_y,
     latestAccelZ = latest_health?.acceleration_z,
+    latestWeight = latest_health?.body_weight_kg ?: weight,
+    latestWeightStable = latest_health?.weight_stable ?: false,
     overallStatus = latest_health?.overall_status,
     latestTimestamp = latest_health?.timestamp,
     latestMilkQty = latest_milk?.quantity,
@@ -1058,7 +1302,12 @@ fun SplashScreen(onFinished: () -> Unit) {
                         .border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("🐄", fontSize = 52.sp)
+                    Icon(
+                        imageVector = Icons.Default.Pets,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(52.dp)
+                    )
                 }
             }
 
@@ -1179,11 +1428,22 @@ fun MainScreen(
     }
 
     val snackbarHostState = remember { SnackbarHostState() }
+    var viewingWeightForCowId by remember { mutableStateOf<String?>(null) }
+
+    if (viewingWeightForCowId != null) {
+        WeightMonitoringScreen(
+            cattleId = viewingWeightForCowId!!,
+            viewModel = viewModel,
+            onBack = { viewingWeightForCowId = null }
+        )
+        return
+    }
 
     if (selectedCow != null) {
         CowProfileScreen(
             cow = selectedCow,
-            onBack = { selectedCowId = null }
+            onBack = { selectedCowId = null },
+            onOpenWeightScreen = { viewingWeightForCowId = selectedCow.cattleId }
         )
         return
     }
@@ -1204,7 +1464,12 @@ fun MainScreen(
                                 .background(MaterialTheme.colorScheme.primaryContainer),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("🐄", fontSize = 18.sp)
+                            Icon(
+                                imageVector = Icons.Default.Pets,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
                         Column {
                             Text(
@@ -1319,7 +1584,11 @@ fun MainScreen(
                 .padding(innerPadding)
         ) {
             when (currentTab) {
-                0 -> DashboardTab(viewModel = viewModel, onOpenSettings = onOpenSettings)
+                0 -> DashboardTab(
+                    viewModel = viewModel,
+                    onOpenSettings = onOpenSettings,
+                    onOpenWeight = { viewingWeightForCowId = it }
+                )
                 1 -> AlertsTab(viewModel = viewModel)
                 2 -> HistoryTab(viewModel = viewModel)
                 3 -> CowsTab(viewModel = viewModel, onViewProfile = { selectedCowId = it.cattleId })
@@ -1333,7 +1602,8 @@ fun MainScreen(
 @Composable
 fun DashboardTab(
     viewModel: CattleViewModel,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onOpenWeight: (String) -> Unit = {}
 ) {
     val spacing = MaterialTheme.spacing
     val healthColors = MaterialTheme.healthColors
@@ -1362,6 +1632,31 @@ fun DashboardTab(
             onConfigureClick = onOpenSettings,
             onRetryClick = { viewModel.retryConnection() }
         )
+
+        val serialBusy by viewModel.serialBusy.collectAsState()
+        if (serialBusy) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Red.copy(alpha = 0.15f)),
+                border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(Red)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(Icons.Default.Warning, contentDescription = null, tint = Red)
+                    Column {
+                        Text("Serial port busy", fontWeight = FontWeight.Bold, color = Red)
+                        Text(
+                            "Another program (e.g. Serial Monitor) is using the COM port. Close other programs to restore live hardware streaming.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+        }
 
         // Farm Health Overview Card
         val totalCattle = displayCattle.size
@@ -1456,14 +1751,14 @@ fun DashboardTab(
             )
         } else {
             displayCattle.forEach { cow ->
-                CattleTelemetrySection(cattle = cow)
+                CattleTelemetrySection(cattle = cow, onOpenWeight = onOpenWeight)
             }
         }
     }
 }
 
 @Composable
-fun CattleTelemetrySection(cattle: Cattle) {
+fun CattleTelemetrySection(cattle: Cattle, onOpenWeight: (String) -> Unit = {}) {
     val spacing = MaterialTheme.spacing
     val isHealthy = cattle.overall.lowercase() in listOf("healthy", "normal")
 
@@ -1491,12 +1786,17 @@ fun CattleTelemetrySection(cattle: Cattle) {
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(40.dp)
+                            .size(36.dp)
                             .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primaryContainer),
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("🐄", fontSize = 20.sp)
+                        Icon(
+                            imageVector = Icons.Default.Pets,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
                     Column {
                         Text(
@@ -1530,11 +1830,11 @@ fun CattleTelemetrySection(cattle: Cattle) {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(spacing.xs)
                     ) {
-                        Icon(Icons.Default.Warning, contentDescription = null, tint = Red, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Warning, contentDescription = null, tint = Red, modifier = Modifier.size(16.dp))
                         Text(
-                            text = "SIMULATED DATA (NON-HARDWARE TEST)",
+                            text = "Simulation mode active",
                             color = Red,
-                            fontWeight = FontWeight.Bold,
+                            fontWeight = FontWeight.Medium,
                             style = MaterialTheme.typography.labelMedium
                         )
                     }
@@ -1546,31 +1846,35 @@ fun CattleTelemetrySection(cattle: Cattle) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
+                val isSerialBusy = cattle.dataSource == "Serial port busy"
                 val badgeBg = when {
                     cattle.isSimulated -> Red.copy(alpha = 0.15f)
+                    isSerialBusy -> Red.copy(alpha = 0.15f)
                     cattle.isStale -> Orange.copy(alpha = 0.15f)
                     cattle.dataSource.startsWith("Live") -> Green.copy(alpha = 0.15f)
                     else -> MaterialTheme.colorScheme.surfaceVariant
                 }
                 val badgeColor = when {
                     cattle.isSimulated -> Red
+                    isSerialBusy -> Red
                     cattle.isStale -> Orange
                     cattle.dataSource.startsWith("Live") -> Green
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 }
                 val badgeLabel = when {
-                    cattle.isSimulated -> "SIMULATED"
-                    cattle.isStale -> "DISCONNECTED"
+                    cattle.isSimulated -> "Simulation"
+                    isSerialBusy -> "Port busy"
+                    cattle.isStale -> "Disconnected"
                     else -> cattle.dataSource
                 }
 
                 Surface(
                     shape = CircleShape,
                     color = badgeBg,
-                    border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(badgeColor.copy(alpha = 0.5f)))
+                    border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(badgeColor.copy(alpha = 0.35f)))
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
@@ -1581,9 +1885,9 @@ fun CattleTelemetrySection(cattle: Cattle) {
                                 .background(badgeColor)
                         )
                         Text(
-                            text = badgeLabel.uppercase(),
+                            text = badgeLabel,
                             style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
+                            fontWeight = FontWeight.Medium,
                             color = badgeColor
                         )
                     }
@@ -1602,48 +1906,296 @@ fun CattleTelemetrySection(cattle: Cattle) {
             }
 
             SectionHeader(
-                title = stringResource(R.string.live_monitoring).uppercase(),
+                title = stringResource(R.string.live_monitoring),
                 icon = Icons.Default.Sensors
             )
 
-            // Grid of live metric cards
-            Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
-                cattle.sensors.chunked(2).forEach { rowSensors ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(spacing.sm)
-                    ) {
-                        rowSensors.forEach { sensor ->
-                            Box(modifier = Modifier.weight(1f)) {
-                                val vectorIcon = when (sensor.label.lowercase()) {
-                                    "spo2" -> Icons.Default.Bloodtype
-                                    "heart rate" -> Icons.Default.Favorite
-                                    "body temp" -> Icons.Default.Thermostat
-                                    "ph level" -> Icons.Default.Science
-                                    "light" -> Icons.Default.LightMode
-                                    "steps today" -> Icons.Default.DirectionsWalk
-                                    "total steps" -> Icons.Default.Timeline
-                                    else -> Icons.Default.ScreenRotation
-                                }
+            // EXACT 7 SENSOR CARDS LAYOUT:
+            // ROW 1: Heart Rate | SpO2
+            // ROW 2: Temperature | pH
+            // ROW 3: Light (LDR) | Weight (HX711)
+            // ROW 4: MEMS Accelerometer — One full-width card with X, Y, Z together
+            val hrSensor = cattle.sensors.find { it.label.equals("Heart Rate", ignoreCase = true) }
+            val spo2Sensor = cattle.sensors.find { it.label.equals("SpO2", ignoreCase = true) }
+            val tempSensor = cattle.sensors.find { it.label.contains("Temp", ignoreCase = true) }
+            val phSensor = cattle.sensors.find { it.label.contains("pH", ignoreCase = true) }
+            val ldrSensor = cattle.sensors.find { it.label.contains("Light", ignoreCase = true) || it.label.contains("LDR", ignoreCase = true) }
+            val weightSensor = cattle.sensors.find { it.label.equals("Weight", ignoreCase = true) }
 
-                                MetricCard(
-                                    label = sensor.label,
-                                    value = if (cattle.isStale) "Not Available" else sensor.value,
-                                    unit = sensor.unit,
-                                    icon = vectorIcon,
-                                    statusText = if (cattle.isStale) "Disconnected" else sensor.status,
-                                    statusColor = if (cattle.isStale) Grey else sensor.color,
-                                    isValid = sensor.isValid && sensor.value != "Not Available" && !cattle.isStale,
-                                    subtitle = if (cattle.isStale) "Disconnected (>10s timeout)" else sensor.reason
-                                )
-                            }
-                        }
-                        if (rowSensors.size == 1) {
-                            Spacer(Modifier.weight(1f))
-                        }
+            Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                // ROW 1: Heart Rate | SpO2
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(spacing.sm)
+                ) {
+                    Box(modifier = Modifier.weight(1f)) {
+                        val s = hrSensor
+                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        MetricCard(
+                            label = "Heart Rate",
+                            value = valStr,
+                            unit = if (valStr == "Not Available") "" else "bpm",
+                            icon = Icons.Default.Favorite,
+                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: "Normal",
+                            statusColor = if (cattle.isStale) Grey else s?.color ?: Green,
+                            isValid = (s?.isValid == true) && valStr != "Not Available" && !cattle.isStale,
+                            subtitle = if (cattle.isStale) "Disconnected" else s?.reason
+                        )
+                    }
+                    Box(modifier = Modifier.weight(1f)) {
+                        val s = spo2Sensor
+                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        MetricCard(
+                            label = "SpO2",
+                            value = valStr,
+                            unit = if (valStr == "Not Available") "" else "%",
+                            icon = Icons.Default.Bloodtype,
+                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: "Normal",
+                            statusColor = if (cattle.isStale) Grey else s?.color ?: Green,
+                            isValid = (s?.isValid == true) && valStr != "Not Available" && !cattle.isStale,
+                            subtitle = if (cattle.isStale) "Disconnected" else s?.reason
+                        )
                     }
                 }
+
+                // ROW 2: Temperature | pH
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(spacing.sm)
+                ) {
+                    Box(modifier = Modifier.weight(1f)) {
+                        val s = tempSensor
+                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        MetricCard(
+                            label = "Temperature",
+                            value = valStr,
+                            unit = if (valStr == "Not Available") "" else "°C",
+                            icon = Icons.Default.Thermostat,
+                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: "Normal",
+                            statusColor = if (cattle.isStale) Grey else s?.color ?: Green,
+                            isValid = (s?.isValid == true) && valStr != "Not Available" && !cattle.isStale,
+                            subtitle = if (cattle.isStale) "Disconnected" else s?.reason
+                        )
+                    }
+                    Box(modifier = Modifier.weight(1f)) {
+                        val s = phSensor
+                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        MetricCard(
+                            label = "pH Level",
+                            value = valStr,
+                            unit = if (valStr == "Not Available") "" else "pH",
+                            icon = Icons.Default.Science,
+                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: "Normal",
+                            statusColor = if (cattle.isStale) Grey else s?.color ?: Green,
+                            isValid = (s?.isValid == true) && valStr != "Not Available" && !cattle.isStale,
+                            subtitle = if (cattle.isStale) "Disconnected" else s?.reason
+                        )
+                    }
+                }
+
+                // ROW 3: Light (LDR) | Weight (HX711)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(spacing.sm)
+                ) {
+                    Box(modifier = Modifier.weight(1f)) {
+                        val s = ldrSensor
+                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        MetricCard(
+                            label = "Light (LDR)",
+                            value = valStr,
+                            unit = if (valStr == "Not Available") "" else "lux",
+                            icon = Icons.Default.LightMode,
+                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: "Normal",
+                            statusColor = if (cattle.isStale) Grey else s?.color ?: Green,
+                            isValid = (s?.isValid == true) && valStr != "Not Available" && !cattle.isStale,
+                            subtitle = if (cattle.isStale) "Disconnected" else s?.reason
+                        )
+                    }
+                    Box(modifier = Modifier.weight(1f)) {
+                        val s = weightSensor
+                        val valStr = if (cattle.isStale || s == null) "Not Available" else s.value
+                        val weightSubtitle = if (cattle.isStale) "Disconnected" else if (cattle.weightStable) "Stable • Tap for scale" else "Stabilizing... • Tap for scale"
+                        MetricCard(
+                            label = "Weight (HX711)",
+                            value = valStr,
+                            unit = if (valStr == "Not Available") "" else "kg",
+                            icon = Icons.Default.Scale,
+                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: (if (cattle.weightStable) "Stable" else "Stabilizing"),
+                            statusColor = if (cattle.isStale) Grey else if (cattle.weightStable) Green else Orange,
+                            isValid = (s?.isValid == true) && valStr != "Not Available" && !cattle.isStale,
+                            subtitle = weightSubtitle,
+                            onClick = { onOpenWeight(cattle.id) }
+                        )
+                    }
+                }
+
+                // ROW 4: MEMS Accelerometer — ONE full-width combined card with X-Axis | Y-Axis | Z-Axis
+                MemsDashboardCard(
+                    x = cattle.memsX,
+                    y = cattle.memsY,
+                    z = cattle.memsZ,
+                    fallDetected = cattle.fallDetected,
+                    isStale = cattle.isStale
+                )
             }
+        }
+    }
+}
+
+// ── MEMS ACCELEROMETER COMBINED FULL-WIDTH CARD ──
+@Composable
+fun MemsDashboardCard(
+    x: Float?,
+    y: Float?,
+    z: Float?,
+    fallDetected: Boolean,
+    isStale: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val spacing = MaterialTheme.spacing
+    val healthColors = MaterialTheme.healthColors
+    val isValid = (x != null || y != null || z != null) && !isStale
+
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        border = CardDefaults.outlinedCardBorder().copy(
+            brush = androidx.compose.ui.graphics.SolidColor(
+                if (fallDetected) Red.copy(alpha = 0.4f)
+                else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+            )
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(spacing.md)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(spacing.sm)
+        ) {
+            // Header Row: Icon + Label + Fall Badge / Status Chip
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(spacing.xs)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ScreenRotation,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    Text(
+                        text = "MEMS Axis",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                if (fallDetected) {
+                    Surface(
+                        shape = CircleShape,
+                        color = Red.copy(alpha = 0.12f),
+                        border = CardDefaults.outlinedCardBorder().copy(
+                            brush = androidx.compose.ui.graphics.SolidColor(Red.copy(alpha = 0.3f))
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = Red,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text(
+                                text = "Fall detected",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Medium,
+                                color = Red
+                            )
+                        }
+                    }
+                } else {
+                    val statusText = if (isStale) "Disconnected" else if (isValid) "Active" else "Offline"
+                    HealthStatusChip(
+                        status = statusText,
+                        statusType = if (isValid && !isStale) HealthStatusType.HEALTHY else HealthStatusType.CRITICAL
+                    )
+                }
+            }
+
+            // 3-Column Axis Display
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(MaterialTheme.shapes.small)
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                    .padding(vertical = spacing.sm, horizontal = spacing.xs),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                MemsAxisColumn(label = "X-Axis", value = x, isValid = isValid)
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(36.dp)
+                        .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                )
+                MemsAxisColumn(label = "Y-Axis", value = y, isValid = isValid)
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(36.dp)
+                        .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                )
+                MemsAxisColumn(label = "Z-Axis", value = z, isValid = isValid)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MemsAxisColumn(label: String, value: Float?, isValid: Boolean) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(2.dp))
+        val displayVal = if (!isValid || value == null) "Not Available" else String.format(Locale.US, "%.2f", value)
+        Text(
+            text = displayVal,
+            style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
+            fontWeight = FontWeight.SemiBold,
+            color = if (isValid && value != null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+        )
+        if (isValid && value != null) {
+            Text(
+                text = "m/s²",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -1663,7 +2215,7 @@ fun AlertsTab(viewModel: CattleViewModel) {
         verticalArrangement = Arrangement.spacedBy(spacing.md)
     ) {
         SectionHeader(
-            title = stringResource(R.string.tab_alerts).uppercase(),
+            title = stringResource(R.string.tab_alerts),
             subtitle = "Active physiological alerts & threshold deviations",
             icon = Icons.Default.NotificationsActive
         )
@@ -1763,7 +2315,7 @@ fun HistoryTab(viewModel: CattleViewModel) {
         verticalArrangement = Arrangement.spacedBy(spacing.md)
     ) {
         SectionHeader(
-            title = stringResource(R.string.tab_history).uppercase(),
+            title = stringResource(R.string.tab_history),
             subtitle = "Chronological sensor telemetry log",
             icon = Icons.Default.Timeline
         )
@@ -1801,8 +2353,8 @@ fun HistoryTab(viewModel: CattleViewModel) {
                 val temp = row.getOrNull(3) ?: "N/A"
                 val hum = row.getOrNull(4) ?: "N/A"
                 val ph = row.getOrNull(5) ?: "N/A"
-                val hasFall = row.getOrNull(6) == "🚨"
-                val isHealthy = row.lastOrNull() == "✓"
+                val hasFall = row.getOrNull(6) in listOf("FALL", "Fall", "\uD83D\uDEA8")
+                val isHealthy = row.lastOrNull() in listOf("OK", "✓", "Healthy")
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -1951,8 +2503,8 @@ fun HistoryItem(label: String, value: String) {
         )
         Text(
             text = value,
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
+            fontWeight = FontWeight.Medium,
             color = MaterialTheme.colorScheme.onSurface
         )
     }
@@ -2241,7 +2793,12 @@ fun CowGridCard(
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
-                    Text("🐄", fontSize = 48.sp)
+                    Icon(
+                        imageVector = Icons.Default.Pets,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+                        modifier = Modifier.size(48.dp)
+                    )
                 }
 
                 // Health status badge
@@ -2358,7 +2915,11 @@ fun CowGridCard(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CowProfileScreen(cow: CowProfile, onBack: () -> Unit) {
+fun CowProfileScreen(
+    cow: CowProfile,
+    onBack: () -> Unit,
+    onOpenWeightScreen: () -> Unit = {}
+) {
     val spacing = MaterialTheme.spacing
     val isHealthy = (cow.overallStatus ?: cow.status)?.lowercase() in listOf("healthy", "normal")
 
@@ -2425,7 +2986,12 @@ fun CowProfileScreen(cow: CowProfile, onBack: () -> Unit) {
                                 modifier = Modifier.fillMaxSize()
                             )
                         } else {
-                            Text("🐄", fontSize = 72.sp)
+                            Icon(
+                                imageVector = Icons.Default.Pets,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+                                modifier = Modifier.size(64.dp)
+                            )
                         }
 
                         Box(
@@ -2464,7 +3030,7 @@ fun CowProfileScreen(cow: CowProfile, onBack: () -> Unit) {
 
             // Latest Health Readings
             SectionHeader(
-                title = "LATEST HEALTH VITALS",
+                title = "Latest health vitals",
                 icon = Icons.Default.Favorite
             )
 
@@ -2533,6 +3099,12 @@ fun CowProfileScreen(cow: CowProfile, onBack: () -> Unit) {
                 }
             }
 
+            // Dedicated Weight Monitoring Section
+            CowProfileWeightSection(
+                cow = cow,
+                onOpenWeightScreen = onOpenWeightScreen
+            )
+
             // Vitals Trend Line Chart
             val profileTrendPoints = remember(cow.cattleId, cow.latestTemp, cow.latestHeartRate) {
                 if (cow.latestTemp != null) {
@@ -2555,7 +3127,7 @@ fun CowProfileScreen(cow: CowProfile, onBack: () -> Unit) {
 
             // Production & Feed Cards
             SectionHeader(
-                title = "PRODUCTION & INTAKE",
+                title = "Production & intake",
                 icon = Icons.Default.Restaurant
             )
 
@@ -2639,7 +3211,7 @@ fun CowProfileScreen(cow: CowProfile, onBack: () -> Unit) {
 
             // Notes
             if (!cow.notes.isNullOrBlank()) {
-                SectionHeader(title = "CLINICAL NOTES", icon = Icons.Default.Description)
+                SectionHeader(title = "Clinical notes", icon = Icons.Default.Description)
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.medium,
@@ -2657,6 +3229,642 @@ fun CowProfileScreen(cow: CowProfile, onBack: () -> Unit) {
 
             Spacer(Modifier.height(spacing.lg))
         }
+    }
+}
+
+// ── COW PROFILE WEIGHT MONITORING SECTION ──
+@Composable
+fun CowProfileWeightSection(
+    cow: CowProfile,
+    onOpenWeightScreen: () -> Unit
+) {
+    val spacing = MaterialTheme.spacing
+    val healthColors = MaterialTheme.healthColors
+
+    val weightVal = cow.latestWeight
+    val weightDisplay = if (weightVal != null) String.format(Locale.US, "%.1f kg", weightVal) else "Not Available"
+    val isStable = cow.latestWeightStable
+
+    SectionHeader(
+        title = "Body weight & scale",
+        icon = Icons.Default.Scale
+    )
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = CardDefaults.outlinedCardBorder()
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(spacing.md)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(spacing.sm)
+        ) {
+            // Header: Scale Tag & Stability Chip
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(spacing.xs)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Scale,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    Text(
+                        text = "HX711 Cattle Scale",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                if (weightVal != null) {
+                    val chipBg = if (isStable) healthColors.healthy.copy(alpha = 0.12f) else Orange.copy(alpha = 0.12f)
+                    val chipColor = if (isStable) healthColors.healthy else Orange
+                    Surface(
+                        shape = CircleShape,
+                        color = chipBg,
+                        border = CardDefaults.outlinedCardBorder().copy(
+                            brush = androidx.compose.ui.graphics.SolidColor(chipColor.copy(alpha = 0.3f))
+                        )
+                    ) {
+                        Text(
+                            text = if (isStable) "Stable" else "Stabilizing",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Medium,
+                            color = chipColor,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                } else {
+                    HealthStatusChip(status = "Offline", statusType = HealthStatusType.CRITICAL)
+                }
+            }
+
+            // Big Weight Typography
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        text = "Current Body Weight",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = weightDisplay,
+                        style = MaterialTheme.typography.headlineMedium.copy(fontFeatureSettings = "tnum"),
+                        fontWeight = FontWeight.Bold,
+                        color = if (weightVal != null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                }
+
+                if (weightVal != null) {
+                    Surface(
+                        shape = MaterialTheme.shapes.small,
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+                        border = CardDefaults.outlinedCardBorder()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = Green,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "EEPROM Calibrated",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            )
+
+            // Weight Metadata
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text("Stability Status", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = if (weightVal == null) "Sensor Offline" else if (isStable) "Stable Measurement" else "Dynamic / In Motion",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("Last Recorded", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = cow.latestTimestamp ?: "Not Available",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(spacing.xxs))
+
+            SmartPrimaryButton(
+                text = "Open scale & analytics",
+                leadingIcon = Icons.Default.Scale,
+                onClick = onOpenWeightScreen,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+// ══════════════ DEDICATED WEIGHT MONITORING SCREEN ══════════════
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun WeightMonitoringScreen(
+    cattleId: String,
+    viewModel: CattleViewModel,
+    onBack: () -> Unit
+) {
+    val spacing = MaterialTheme.spacing
+    val healthColors = MaterialTheme.healthColors
+
+    val cowProfiles by viewModel.cowProfiles.collectAsState()
+    val cow = cowProfiles.find { it.cattleId == cattleId }
+    val cowName = cow?.name?.ifEmpty { cattleId } ?: cattleId
+
+    val liveWeight by viewModel.liveWeight.collectAsState()
+    val liveStable by viewModel.liveWeightStable.collectAsState()
+    val liveCalibrated by viewModel.liveWeightCalibrated.collectAsState()
+    val isConnected by viewModel.isConnected.collectAsState()
+    val isLoading by viewModel.isWeightActionLoading.collectAsState()
+    val weightStats by viewModel.weightStats.collectAsState()
+    val weightHistory by viewModel.weightHistory.collectAsState()
+
+    var showCalibrateDialog by remember { mutableStateOf(false) }
+    var snackbarMessage by remember { mutableStateOf<String?>(null) }
+    var selectedRangeIndex by remember { mutableIntStateOf(0) } // 0: All, 1: 7D, 2: 30D, 3: 90D
+
+    LaunchedEffect(cattleId) {
+        viewModel.fetchWeightData(cattleId)
+    }
+
+    val filteredHistory = remember(weightHistory, selectedRangeIndex) {
+        when (selectedRangeIndex) {
+            1 -> weightHistory.take(7)
+            2 -> weightHistory.take(30)
+            3 -> weightHistory.take(90)
+            else -> weightHistory
+        }
+    }
+
+    val chartDataPoints = remember(filteredHistory) {
+        filteredHistory.map { it.weight_kg }.reversed()
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(
+                            text = "Weight Monitoring & Scale",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "$cowName ($cattleId)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .padding(spacing.md),
+            verticalArrangement = Arrangement.spacedBy(spacing.md)
+        ) {
+            // Notification message
+            snackbarMessage?.let { msg ->
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(spacing.sm),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(msg, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                        IconButton(onClick = { snackbarMessage = null }, modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.Default.Clear, contentDescription = "Dismiss", modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+            }
+
+            // Live Scale Gauge Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.large,
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = CardDefaults.outlinedCardBorder()
+            ) {
+                Column(
+                    modifier = Modifier.padding(spacing.md),
+                    verticalArrangement = Arrangement.spacedBy(spacing.sm)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(spacing.xs)
+                        ) {
+                            Icon(Icons.Default.Scale, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Text(
+                                text = "Live scale reading",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        val statusChipType = when {
+                            !isConnected -> HealthStatusType.CRITICAL
+                            liveWeight == null -> HealthStatusType.WARNING
+                            liveStable -> HealthStatusType.HEALTHY
+                            else -> HealthStatusType.WARNING
+                        }
+                        val statusText = when {
+                            !isConnected -> "Offline"
+                            liveWeight == null -> "Waiting"
+                            liveStable -> "Stable"
+                            else -> "Stabilizing"
+                        }
+                        HealthStatusChip(status = statusText, statusType = statusChipType)
+                    }
+
+                    // Weight Big Display
+                    val displayWeight = if (liveWeight != null && isConnected) String.format(Locale.US, "%.1f", liveWeight) else "Not Available"
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = displayWeight,
+                            style = MaterialTheme.typography.displayMedium.copy(fontFeatureSettings = "tnum"),
+                            fontWeight = FontWeight.Bold,
+                            color = if (liveWeight != null && isConnected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        )
+                        if (displayWeight != "Not Available") {
+                            Text(
+                                text = " kg",
+                                style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 6.dp)
+                            )
+                        }
+                    }
+
+                    // Hardware scale metadata
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Sensor Hardware", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(if (isConnected) "HX711 Load Cell" else "Disconnected", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                        }
+                        Box(Modifier.width(1.dp).height(24.dp).background(MaterialTheme.colorScheme.outlineVariant))
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Calibration Factor", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(if (liveCalibrated) "EEPROM Verified" else "Uncalibrated", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    )
+
+                    // Hardware Scale Controls
+                    Text("Scale controls", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(spacing.sm)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.tareScale { ok, msg ->
+                                    snackbarMessage = msg ?: if (ok) "Tare success" else "Tare failed"
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            enabled = !isLoading && isConnected
+                        ) {
+                            Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Tare Scale")
+                        }
+
+                        OutlinedButton(
+                            onClick = { showCalibrateDialog = true },
+                            modifier = Modifier.weight(1f),
+                            enabled = !isLoading && isConnected
+                        ) {
+                            Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Calibrate")
+                        }
+                    }
+
+                    Button(
+                        onClick = {
+                            val w = liveWeight ?: cow?.latestWeight ?: 0f
+                            if (w > 0f) {
+                                viewModel.recordWeightMeasurement(cattleId, w) { ok, msg ->
+                                    snackbarMessage = msg ?: if (ok) "Weight recorded!" else "Failed"
+                                }
+                            } else {
+                                snackbarMessage = "No valid weight reading to record"
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isLoading && liveWeight != null && liveWeight!! > 0f
+                    ) {
+                        Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (isLoading) "Recording..." else "Confirm & record weight")
+                    }
+                }
+            }
+
+            // Weight Analytics & Statistics Card
+            SectionHeader(title = "Weight analytics", icon = Icons.Default.Analytics)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.medium,
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = CardDefaults.outlinedCardBorder()
+            ) {
+                Column(
+                    modifier = Modifier.padding(spacing.md),
+                    verticalArrangement = Arrangement.spacedBy(spacing.sm)
+                ) {
+                    val stats = weightStats
+                    val prevWeight = stats?.previous_weight_kg
+                    val diffKg = stats?.difference_kg
+                    val trend = stats?.trend ?: "stable"
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        MiniStatCard("Previous Confirmed", prevWeight?.let { String.format(Locale.US, "%.1f kg", it) } ?: "No record", Icons.Default.History)
+                        MiniStatCard(
+                            label = "Difference",
+                            value = if (diffKg != null) String.format(Locale.US, "%+.1f kg", diffKg) else "0.0 kg",
+                            icon = Icons.Default.Timeline
+                        )
+                        MiniStatCard(
+                            label = "Trend",
+                            value = trend.uppercase(Locale.US),
+                            icon = Icons.Default.Analytics
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text("7-Day Average", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                text = stats?.average_7d?.let { String.format(Locale.US, "%.1f kg", it) } ?: "Not Available",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text("30-Day Average", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                text = stats?.average_30d?.let { String.format(Locale.US, "%.1f kg", it) } ?: "Not Available",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Filter Chips: All, 7D, 30D, 90D
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(spacing.xs)
+            ) {
+                listOf("All Records", "7 Days", "30 Days", "90 Days").forEachIndexed { index, title ->
+                    FilterChip(
+                        selected = selectedRangeIndex == index,
+                        onClick = { selectedRangeIndex = index },
+                        label = { Text(title) }
+                    )
+                }
+            }
+
+            // Weight Trend Chart
+            if (chartDataPoints.size >= 2) {
+                VitalTrendChart(
+                    title = "Weight Trend (Database Verified)",
+                    dataPoints = chartDataPoints,
+                    unit = "kg",
+                    lineColor = MaterialTheme.colorScheme.primary
+                )
+            } else if (weightHistory.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                ) {
+                    Box(modifier = Modifier.fillMaxWidth().padding(spacing.md), contentAlignment = Alignment.Center) {
+                        Text("1 confirmed weight record in database: ${weightHistory.first().weight_kg} kg", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+
+            // Historical Records Table / List
+            SectionHeader(title = "Confirmed weight history (${filteredHistory.size})", icon = Icons.Default.History)
+            if (filteredHistory.isEmpty()) {
+                EmptyStateView(
+                    title = "No Confirmed Weight Records",
+                    message = "Record weights using the 'Confirm & Record Weight' scale button above.",
+                    icon = Icons.Default.Scale
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(spacing.xs)) {
+                    filteredHistory.forEach { row ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = MaterialTheme.shapes.small,
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            border = CardDefaults.outlinedCardBorder()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .padding(spacing.sm)
+                                    .fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(spacing.sm)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Scale,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Column {
+                                        Text(
+                                            text = String.format(Locale.US, "%.1f kg", row.weight_kg),
+                                            style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = row.measured_at.take(19).replace("T", " "),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+
+                                Surface(
+                                    shape = CircleShape,
+                                    color = if (row.is_stable) Green.copy(alpha = 0.12f) else Orange.copy(alpha = 0.12f),
+                                    border = CardDefaults.outlinedCardBorder().copy(
+                                        brush = androidx.compose.ui.graphics.SolidColor(
+                                            (if (row.is_stable) Green else Orange).copy(alpha = 0.25f)
+                                        )
+                                    )
+                                ) {
+                                    Text(
+                                        text = if (row.is_stable) "Stable" else "Unstable",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Medium,
+                                        color = if (row.is_stable) Green else Orange,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(spacing.lg))
+        }
+    }
+
+    // Calibrate Dialog
+    if (showCalibrateDialog) {
+        var refWeightInput by remember { mutableStateOf("50.0") }
+        AlertDialog(
+            onDismissRequest = { showCalibrateDialog = false },
+            title = { Text("Physical Scale Calibration") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(spacing.xs)) {
+                    Text(
+                        "1. Ensure platform is tared (unloaded).\n" +
+                        "2. Place a known reference test weight on scale.\n" +
+                        "3. Enter the exact reference weight below and confirm.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    OutlinedTextField(
+                        value = refWeightInput,
+                        onValueChange = { refWeightInput = it },
+                        label = { Text("Reference Weight (kg)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val ref = refWeightInput.toFloatOrNull()
+                        if (ref != null && ref > 0f) {
+                            showCalibrateDialog = false
+                            viewModel.calibrateScale(ref) { ok, msg ->
+                                snackbarMessage = msg ?: if (ok) "Calibrated with $ref kg!" else "Failed"
+                            }
+                        }
+                    }
+                ) {
+                    Text("Calibrate")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCalibrateDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 
@@ -2911,7 +4119,12 @@ fun AddCowDialog(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(spacing.sm)
                 ) {
-                    Text("🐄", fontSize = 24.sp)
+                    Icon(
+                        imageVector = Icons.Default.Pets,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
                     Text(
                         text = stringResource(R.string.add_new_cow),
                         style = MaterialTheme.typography.titleLarge,

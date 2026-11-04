@@ -41,17 +41,27 @@ class ConnectionManager:
             old_conn = self.active_connections[client_id]
             try:
                 await old_conn.websocket.close()
-            except:
+            except Exception:
                 pass
             
         conn = Connection(websocket, client_id)
         self.active_connections[client_id] = conn
-        logger.info(f"Client {client_id} connected (reconnect={reconnect})")
+        client_ip = getattr(websocket.client, 'host', 'unknown') if websocket.client else 'unknown'
+        logger.info(
+            f"[WS CLIENT CONNECT] timestamp={datetime.now(timezone.utc).isoformat()} "
+            f"client_id={client_id} ip={client_ip} reconnect={reconnect} "
+            f"active_clients={len(self.active_connections)}"
+        )
 
-    def disconnect(self, client_id: str):
+    def disconnect(self, client_id: str, reason: str = "normal"):
         if client_id in self.active_connections:
-            del self.active_connections[client_id]
-            logger.info(f"Client {client_id} disconnected")
+            conn = self.active_connections.pop(client_id)
+            duration = (datetime.now(timezone.utc) - conn.connected_at).total_seconds()
+            logger.info(
+                f"[WS CLIENT DISCONNECT] timestamp={datetime.now(timezone.utc).isoformat()} "
+                f"client_id={client_id} duration_s={duration:.1f} reason={reason} "
+                f"remaining_clients={len(self.active_connections)}"
+            )
 
     def subscribe(self, client_id: str, cattle_id: str):
         if client_id in self.active_connections:
@@ -59,11 +69,11 @@ class ConnectionManager:
 
     async def ping_clients(self):
         while True:
-            await asyncio.sleep(30)
+            await asyncio.sleep(15)
             dead_clients = []
-            for client_id, conn in self.active_connections.items():
+            for client_id, conn in list(self.active_connections.items()):
                 if conn.is_offline:
-                    dead_clients.append(client_id)
+                    dead_clients.append((client_id, "heartbeat_timeout"))
                 else:
                     try:
                         ping_event = WebSocketEvent(
@@ -73,11 +83,11 @@ class ConnectionManager:
                             payload={"message": "ping"}
                         )
                         await conn.websocket.send_text(ping_event.model_dump_json())
-                    except:
-                        dead_clients.append(client_id)
+                    except Exception as e:
+                        dead_clients.append((client_id, f"send_failed:{e}"))
             
-            for cid in dead_clients:
-                self.disconnect(cid)
+            for cid, rsn in dead_clients:
+                self.disconnect(cid, reason=rsn)
 
     def format_event(self, event_type: EventType, payload: dict, cattle_id: Optional[str] = None, device_id: Optional[str] = None) -> WebSocketEvent:
         return WebSocketEvent(

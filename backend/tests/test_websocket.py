@@ -34,3 +34,13 @@ def test_websocket_reconnect():
         websocket.send_text("pong")
         
     assert True
+
+def test_websocket_client_ping_triggers_pong_response():
+    """Verify that when a client sends a 'ping' message, the server responds with a pong heartbeat event."""
+    import json
+    with client.websocket_connect("/ws?client_id=test_ping_client") as websocket:
+        websocket.send_text("ping")
+        response_text = websocket.receive_text()
+        data = json.loads(response_text)
+        assert data.get("event_type") == "heartbeat"
+        assert data.get("payload", {}).get("message") == "pong"

@@ -60,9 +60,9 @@
     <string name="field_gender_male">Male</string>
     <string name="field_dob">Date of Birth (YYYY-MM-DD)</string>
     <string name="field_notes">Notes</string>
-    <string name="btn_select_photo">📷 Select Photo</string>
-    <string name="btn_change_photo">📷 Change Photo</string>
-    <string name="photo_selected">✓ Photo selected</string>
+    <string name="btn_select_photo">Select Photo</string>
+    <string name="btn_change_photo">Change Photo</string>
+    <string name="photo_selected">Photo selected</string>
     <string name="btn_save_changes">Save Changes</string>
     <string name="btn_cancel">Cancel</string>
     <string name="btn_connect">Connect</string>

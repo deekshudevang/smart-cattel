@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, ValidationError, model_validator, Field
 from typing import Optional, Tuple, Dict, Any, Union
 
 class TelemetryPacket(BaseModel):
@@ -59,7 +59,22 @@ class TelemetryPacket(BaseModel):
     gps_lon: Optional[Union[float, str]] = None
     gps_satellites: Optional[int] = 0
 
+    # Weight / Load Cell (Canonical)
+    body_weight_kg: Optional[float] = None
+    weight_raw: Optional[int] = None
+    weight_stable: Optional[bool] = False
+    weight_calibrated: Optional[bool] = False
+    weight_valid: Optional[bool] = False
+    weight_sensor_status: Optional[str] = "disconnected"
+
+    # Explicit validity and reason maps for clients
+    validity: Dict[str, bool] = Field(default_factory=dict)
+    validity_reasons: Dict[str, Optional[str]] = Field(default_factory=dict)
+
     # ── Deprecated Property Accessors (Sunset: 2026-12-31) ──
+    @property
+    def weight_kg(self) -> Optional[float]:
+        return self.body_weight_kg
     @property
     def bpm(self) -> Optional[float]:
         return self.heart_rate
@@ -139,6 +154,8 @@ class TelemetryPacket(BaseModel):
 
         accel_v = data.get("accelerometer_valid", data.get("mems_valid", False))
         data["accelerometer_valid"] = bool(accel_v)
+        reasons = dict(data.get("validity_reasons", {}))
+        reasons["accelerometer"] = None if data["accelerometer_valid"] else "Sensor not connected"
 
         # 4. Heart Rate reconciliation to canonical heart_rate & range check
         hr_val = data.get("heart_rate") if data.get("heart_rate") is not None else (data.get("heart_rate_bpm") if data.get("heart_rate_bpm") is not None else data.get("bpm"))
@@ -147,18 +164,24 @@ class TelemetryPacket(BaseModel):
                 hr_num = float(hr_val)
                 if 20.0 <= hr_num <= 300.0:
                     data["heart_rate"] = hr_num
+                    reasons["heart_rate"] = None
                 else:
                     data["heart_rate"] = None
                     data["heart_rate_valid"] = False
+                    reasons["heart_rate"] = "Reading out of valid range"
             except (ValueError, TypeError):
                 data["heart_rate"] = None
                 data["heart_rate_valid"] = False
+                reasons["heart_rate"] = "Reading out of valid range"
         else:
             data["heart_rate"] = None
+            reasons["heart_rate"] = "No contact"
 
         if data.get("heart_rate") is not None:
             hr_v = data.get("heart_rate_valid", data.get("bpm_valid", data.get("hr_valid", True)))
             data["heart_rate_valid"] = bool(hr_v)
+            if not data["heart_rate_valid"] and not reasons.get("heart_rate"):
+                reasons["heart_rate"] = "No contact"
         else:
             data["heart_rate_valid"] = False
 
@@ -170,15 +193,19 @@ class TelemetryPacket(BaseModel):
                 if 30.0 <= spo2_num <= 100.0:
                     data["spo2"] = spo2_num
                     data["spo2_valid"] = bool(data.get("spo2_valid", True))
+                    reasons["spo2"] = None if data["spo2_valid"] else "No contact"
                 else:
                     data["spo2"] = None
                     data["spo2_valid"] = False
+                    reasons["spo2"] = "Reading out of valid range"
             except (ValueError, TypeError):
                 data["spo2"] = None
                 data["spo2_valid"] = False
+                reasons["spo2"] = "Reading out of valid range"
         else:
             data["spo2"] = None
             data["spo2_valid"] = False
+            reasons["spo2"] = "No contact"
 
         # 6. Temperature reconciliation to canonical temperature & range check
         temp_val = data.get("temperature") if data.get("temperature") is not None else data.get("temperature_c")
@@ -188,15 +215,19 @@ class TelemetryPacket(BaseModel):
                 if -20.0 <= temp_num <= 80.0:
                     data["temperature"] = temp_num
                     data["temperature_valid"] = bool(data.get("temperature_valid", data.get("temp_valid", True)))
+                    reasons["temperature"] = None if data["temperature_valid"] else "Sensor not connected"
                 else:
                     data["temperature"] = None
                     data["temperature_valid"] = False
+                    reasons["temperature"] = "Reading out of valid range"
             except (ValueError, TypeError):
                 data["temperature"] = None
                 data["temperature_valid"] = False
+                reasons["temperature"] = "Reading out of valid range"
         else:
             data["temperature"] = None
             data["temperature_valid"] = False
+            reasons["temperature"] = "Sensor not connected"
 
         # 7. pH reconciliation to canonical ph & range check
         ph_val = data.get("ph") if data.get("ph") is not None else data.get("ph_value")
@@ -206,15 +237,19 @@ class TelemetryPacket(BaseModel):
                 if 0.0 <= ph_num <= 14.0:
                     data["ph"] = ph_num
                     data["ph_valid"] = bool(data.get("ph_valid", True))
+                    reasons["ph"] = None if data["ph_valid"] else "Probe not in solution"
                 else:
                     data["ph"] = None
                     data["ph_valid"] = False
+                    reasons["ph"] = "Reading out of valid range"
             except (ValueError, TypeError):
                 data["ph"] = None
                 data["ph_valid"] = False
+                reasons["ph"] = "Reading out of valid range"
         else:
             data["ph"] = None
             data["ph_valid"] = False
+            reasons["ph"] = "Probe not in solution"
 
         # 8. LDR reconciliation to canonical ldr & range check (preserving 0 lux)
         ldr_val = data.get("ldr") if data.get("ldr") is not None else data.get("ldr_value")
@@ -224,17 +259,69 @@ class TelemetryPacket(BaseModel):
                 if 0.0 <= ldr_num <= 1024.0:
                     data["ldr"] = ldr_num
                     data["ldr_valid"] = bool(data.get("ldr_valid", True))
+                    reasons["ldr"] = None if data["ldr_valid"] else "Sensor not connected"
                 else:
                     data["ldr"] = None
                     data["ldr_valid"] = False
+                    reasons["ldr"] = "Reading out of valid range"
             except (ValueError, TypeError):
                 data["ldr"] = None
                 data["ldr_valid"] = False
+                reasons["ldr"] = "Reading out of valid range"
         else:
             data["ldr"] = None
             data["ldr_valid"] = False
+            reasons["ldr"] = "Sensor not connected"
 
-        # 9. GPS coordinates to float when possible
+        # 9. Weight / Load cell reconciliation to canonical body_weight_kg & range check
+        w_val = data.get("body_weight_kg") if data.get("body_weight_kg") is not None else data.get("weight_kg")
+        if w_val is None and data.get("weight") is not None:
+            w_val = data.get("weight")
+        if w_val is not None:
+            try:
+                w_num = float(w_val)
+                if 0.0 <= w_num <= 1500.0:
+                    data["body_weight_kg"] = round(w_num, 2)
+                    data["weight_valid"] = bool(data.get("weight_valid", True))
+                    reasons["weight"] = None if data["weight_valid"] else "Sensor disconnected"
+                else:
+                    data["body_weight_kg"] = None
+                    data["weight_valid"] = False
+                    reasons["weight"] = "Reading out of valid range"
+            except (ValueError, TypeError):
+                data["body_weight_kg"] = None
+                data["weight_valid"] = False
+                reasons["weight"] = "Reading out of valid range"
+        else:
+            data["body_weight_kg"] = None
+            data["weight_valid"] = False
+            reasons["weight"] = "Sensor disconnected"
+
+        data["weight_stable"] = bool(data.get("weight_stable", False))
+        data["weight_calibrated"] = bool(data.get("weight_calibrated", False))
+        if not data.get("weight_sensor_status"):
+            if not data["weight_valid"]:
+                data["weight_sensor_status"] = "disconnected"
+            elif not data["weight_calibrated"]:
+                data["weight_sensor_status"] = "uncalibrated"
+            elif not data["weight_stable"]:
+                data["weight_sensor_status"] = "unstable"
+            else:
+                data["weight_sensor_status"] = "stable"
+
+        # 10. Build explicit validity and validity_reasons maps
+        data["validity"] = {
+            "heart_rate": data.get("heart_rate_valid", False),
+            "spo2": data.get("spo2_valid", False),
+            "temperature": data.get("temperature_valid", False),
+            "ph": data.get("ph_valid", False),
+            "ldr": data.get("ldr_valid", False),
+            "accelerometer": data.get("accelerometer_valid", False),
+            "weight": data.get("weight_valid", False),
+        }
+        data["validity_reasons"] = reasons
+
+        # 11. GPS coordinates to float when possible
         for k in ("gps_lat", "gps_lon"):
             v = data.get(k)
             if v is not None:

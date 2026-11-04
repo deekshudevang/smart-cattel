@@ -24,6 +24,9 @@ data class CowEntity(
     val latestAccelX: Float? = null,
     val latestAccelY: Float? = null,
     val latestAccelZ: Float? = null,
+    val latestWeight: Float? = null,
+    val latestWeightStable: Boolean? = null,
+    val latestWeightTimestamp: String? = null,
     val latestTimestamp: String? = null,
     val lastSyncTimestamp: Long = System.currentTimeMillis(),
     val isDeleted: Boolean = false
@@ -49,6 +52,8 @@ fun CowEntity.toCowProfile(): com.example.smartcattle.CowProfile {
         latestAccelX = latestAccelX,
         latestAccelY = latestAccelY,
         latestAccelZ = latestAccelZ,
+        latestWeight = latestWeight,
+        latestWeightStable = latestWeightStable ?: false,
         overallStatus = overallStatus,
         latestTimestamp = latestTimestamp,
         latestActivitySteps = latestStepsToday,
@@ -77,9 +82,11 @@ fun com.example.smartcattle.CowProfile.toEntity(): CowEntity {
         latestAccelX = latestAccelX,
         latestAccelY = latestAccelY,
         latestAccelZ = latestAccelZ,
+        latestWeight = latestWeight,
+        latestWeightStable = latestWeightStable,
+        latestWeightTimestamp = latestTimestamp,
         latestTimestamp = latestTimestamp,
         lastSyncTimestamp = System.currentTimeMillis(),
         isDeleted = false
     )
 }
-
