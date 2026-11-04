@@ -246,6 +246,21 @@ async def startup_event():
         with engine.connect() as conn:
             conn.execute(text("UPDATE cattle SET deleted = 0 WHERE deleted IS NULL"))
             conn.commit()
+
+        # Ensure default CATTLE-001 profile exists on fresh deployment
+        default_cow = db.query(models.Cattle).filter(models.Cattle.cattle_id == "CATTLE-001").first()
+        if not default_cow:
+            logger.info("[STARTUP] Seeding default CATTLE-001 profile for new deployment...")
+            db.add(models.Cattle(
+                cattle_id="CATTLE-001",
+                name="CATTLE-001",
+                gender="Female",
+                status="normal",
+                deleted=False
+            ))
+            db.commit()
+    except Exception as e:
+        logger.warning(f"[STARTUP] Error verifying default cattle profile: {e}")
     finally:
         db.close()
 

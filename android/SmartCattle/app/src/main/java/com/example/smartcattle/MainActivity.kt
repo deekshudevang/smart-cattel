@@ -992,13 +992,7 @@ class CattleViewModel : ViewModel() {
                                 return@launch
                             }
 
-                            // Check active profiles: do not process or re-create unknown or deleted cattle
                             val activeProfiles = _cowProfiles.value
-                            val activeIds = activeProfiles.map { it.cattleId }.toSet()
-                            if (activeIds.isNotEmpty() && !activeIds.contains(cid)) {
-                                android.util.Log.w("SmartCattle", "[ANDROID WS] Ignoring telemetry for deleted/unknown cow: $cid")
-                                return@launch
-                            }
 
                             val data = json.getJSONObject("data")
                             val health = json.optJSONObject("health") ?: JSONObject()
@@ -1154,41 +1148,48 @@ class CattleViewModel : ViewModel() {
                             android.util.Log.i("SmartCattle", "[ANDROID WS RAW MESSAGE] $text")
                             android.util.Log.i("SmartCattle", "[ANDROID WS PARSED DTO] cow=$cid hr=$hrVal spo2=$spo2Val temp=$tempVal ph=$phVal ldr=$ldrVal weight=$weightVal")
 
-                            val currentCattle = _cattle.value.filter { activeIds.isEmpty() || activeIds.contains(it.id) }.toMutableList()
+                            val currentCattle = _cattle.value.toMutableList()
                             val idx = currentCattle.indexOfFirst { it.id == cid }
                             if (idx == -1) {
-                                if (activeIds.isEmpty() || activeIds.contains(cid)) {
-                                    currentCattle.add(newCattle)
-                                }
+                                currentCattle.add(newCattle)
                             } else {
                                 currentCattle[idx] = newCattle
                             }
                             _cattle.value = currentCattle
 
-                            // Update _cowProfiles so CowProfileScreen gets real-time vitals updates
-                            if (existingProfile != null) {
-                                val updatedProfile = existingProfile.copy(
-                                    latestSpo2 = if (spo2Val != "Not Available") rawSpo2 else null,
-                                    latestHeartRate = if (hrVal != "Not Available") rawHr else null,
-                                    latestTemp = if (tempVal != "Not Available") rawTemp else null,
-                                    latestPh = if (phVal != "Not Available") rawPh else null,
-                                    latestLdr = if (ldrVal != "Not Available") rawLdr else null,
-                                    latestStepsToday = effectiveStepsToday,
-                                    latestStepsLifetime = effectiveStepsLifetime,
-                                    latestAccelX = if (accelStr != "Not Available") rawAccelX else null,
-                                    latestAccelY = if (accelStr != "Not Available") rawAccelY else null,
-                                    latestAccelZ = if (accelStr != "Not Available") rawAccelZ else null,
-                                    latestWeight = if (weightVal != "Not Available") rawWeight else existingProfile.latestWeight,
-                                    latestWeightStable = weightStable,
-                                    overallStatus = overall,
-                                    latestTimestamp = t
-                                )
-                                _cowProfiles.value = _cowProfiles.value.map { profile ->
-                                    if (profile.cattleId == cid) updatedProfile else profile
-                                }
-                                withContext(Dispatchers.IO) {
-                                    cowDao?.insertOrUpdate(updatedProfile.toEntity())
-                                }
+                            // Generate or update _cowProfiles so CowProfileScreen and Cows tab show the cow profile
+                            val profileToSave = (existingProfile ?: CowProfile(
+                                cattleId = cid,
+                                name = cid,
+                                breed = "Not Available",
+                                age = "Not Available",
+                                overallStatus = overall
+                            )).copy(
+                                latestSpo2 = if (spo2Val != "Not Available") rawSpo2 else null,
+                                latestHeartRate = if (hrVal != "Not Available") rawHr else null,
+                                latestTemp = if (tempVal != "Not Available") rawTemp else null,
+                                latestPh = if (phVal != "Not Available") rawPh else null,
+                                latestLdr = if (ldrVal != "Not Available") rawLdr else null,
+                                latestStepsToday = effectiveStepsToday,
+                                latestStepsLifetime = effectiveStepsLifetime,
+                                latestAccelX = if (accelStr != "Not Available") rawAccelX else null,
+                                latestAccelY = if (accelStr != "Not Available") rawAccelY else null,
+                                latestAccelZ = if (accelStr != "Not Available") rawAccelZ else null,
+                                latestWeight = if (weightVal != "Not Available") rawWeight else existingProfile?.latestWeight,
+                                latestWeightStable = weightStable,
+                                overallStatus = overall,
+                                latestTimestamp = t
+                            )
+                            val currentProfiles = _cowProfiles.value.toMutableList()
+                            val pIdx = currentProfiles.indexOfFirst { it.cattleId == cid }
+                            if (pIdx == -1) {
+                                currentProfiles.add(profileToSave)
+                            } else {
+                                currentProfiles[pIdx] = profileToSave
+                            }
+                            _cowProfiles.value = currentProfiles
+                            withContext(Dispatchers.IO) {
+                                cowDao?.insertOrUpdate(profileToSave.toEntity())
                             }
 
                             val fallIcon = if (fallDetected) "FALL" else ""

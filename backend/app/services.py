@@ -570,16 +570,24 @@ class SensorService:
             f"fall_detected={validated_data.get('fall_detected')}"
         )
 
-        # Check if cattle is registered and active (ignore unknown or deleted)
+        # Check if cattle is registered and active (auto-register on fresh deployments, ignore deleted)
         _db = SessionLocal()
         try:
             existing = _db.query(models.Cattle).filter(
                 models.Cattle.cattle_id == cattle_id
             ).first()
             if not existing:
-                logger.warning(f"[SENSOR SVC] Dropping packet for unknown cattle: {cattle_id}")
-                return {"status": "dropped", "reason": "unknown_cattle"}
-            if existing.deleted:
+                logger.info(f"[SENSOR SVC] Auto-registering new incoming cattle profile: {cattle_id}")
+                existing = models.Cattle(
+                    cattle_id=cattle_id,
+                    name=cattle_id,
+                    status="normal",
+                    deleted=False
+                )
+                _db.add(existing)
+                _db.commit()
+                _db.refresh(existing)
+            elif existing.deleted:
                 logger.warning(f"[SENSOR SVC] Dropping packet for deleted cattle: {cattle_id}")
                 return {"status": "dropped", "reason": "deleted_cattle"}
 
