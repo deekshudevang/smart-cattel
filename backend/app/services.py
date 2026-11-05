@@ -363,6 +363,7 @@ class AlertService:
         }
         import logging as _log
         _logger = _log.getLogger("alert_service")
+        _logger.info(f"[HOP 5: WS BROADCAST] cattle_id={cattle_id} clients={len(manager.active_connections)} overall={overall}")
         _logger.info(
             f"[WS OUT] cattle={cattle_id} ldr={data.get('ldr')} "
             f"spo2={data.get('spo2')} bpm={data.get('bpm')} "
@@ -559,6 +560,9 @@ class SensorService:
         
         fall_info = fall_detector.process(cattle_id, mems_x, mems_y, mems_z, timestamp)
         validated_data.update(fall_info)
+        cattle_id = str(cattle_id or 'CATTLE-001').strip().upper()
+        validated_data['cattle_id'] = cattle_id
+        logger.info(f"[HOP 3: INGEST START] cattle_id={cattle_id} hr={validated_data.get('heart_rate')} spo2={validated_data.get('spo2')} temp={validated_data.get('temperature')} weight={validated_data.get('body_weight_kg')}")
         
         logger.info(
             f"[SENSOR IN] cattle={validated_data.get('cattle_id')} "
@@ -696,6 +700,7 @@ class SensorService:
             _db.close()
         
         reading_id = DatabaseService.save_reading(validated_data)
+        logger.info(f"[HOP 4: DB WRITE OK] cattle_id={cattle_id} reading_id={reading_id}")
         preds = self.prediction_service.predict(validated_data)
         
         # Override mems status if fall is detected

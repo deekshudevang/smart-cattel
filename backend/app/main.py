@@ -224,6 +224,25 @@ async def redis_listener():
 
 @app.on_event("startup")
 async def startup_event():
+    import socket
+    def get_lan_ip():
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
+    lan_ip = get_lan_ip()
+    logger.info("=" * 60)
+    logger.info(" SMART CATTLE BACKEND RUNNING ON 0.0.0.0:8000")
+    logger.info(" Local URL:     http://localhost:8000")
+    logger.info(f" LAN IP:        {lan_ip}")
+    logger.info(f" Android API:   http://{lan_ip}:8000/")
+    logger.info(f" WebSocket:     ws://{lan_ip}:8000/ws/cattle/CATTLE-ALL")
+    logger.info(f" Health Check:  http://{lan_ip}:8000/health")
+    logger.info("=" * 60)
     asyncio.create_task(manager.ping_clients())
     # asyncio.create_task(redis_listener())
 
@@ -360,14 +379,30 @@ async def receive_sensor_data(request: Request):
     return result
 
 @app.get("/api/cattle")
+@app.get("/api/v1/cattle")
 def get_cattle(db: Session = Depends(get_db)):
     from sqlalchemy import or_
     cattle_list = db.query(models.Cattle).filter(
         or_(models.Cattle.deleted == False, models.Cattle.deleted == None)
     ).all()
-    return [{"cattle_id": c.cattle_id, "name": c.name, "status": c.status} for c in cattle_list]
+    return [{
+        "id": c.id,
+        "cattle_id": c.cattle_id,
+        "name": c.name or c.cattle_id,
+        "status": c.status or "normal",
+        "gender": c.gender,
+        "breed": c.breed,
+        "age": c.age,
+        "dob": c.dob,
+        "weight": c.weight,
+        "tag_id": c.tag_id,
+        "created_at": c.created_at,
+        "updated_at": c.updated_at,
+        "deleted": bool(c.deleted)
+    } for c in cattle_list]
 
 @app.get("/api/cows")
+@app.get("/api/v1/cows")
 def get_cows(include_simulated: bool = False, db: Session = Depends(get_db)):
     from sqlalchemy import or_
     cattle_list = db.query(models.Cattle).filter(

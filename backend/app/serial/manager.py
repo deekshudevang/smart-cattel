@@ -23,9 +23,14 @@ logger = logging.getLogger(__name__)
 ARDUINO_VIDS = {
     0x2341,  # Arduino SA (Official Mega 2560, Uno, etc.)
     0x2A03,  # Arduino.org
-    0x1A86,  # QinHeng Electronics CH340 / CH341 (Arduino Mega clones)
+    0x1A86,  # QinHeng Electronics CH340 / CH341 / CH343 / CH9102 (Mega/Uno clones)
     0x10C4,  # Silicon Labs CP210x
-    0x0403,  # FTDI FT232R
+    0x0403,  # FTDI FT232R / FT232H
+    0x067B,  # Prolific PL2303
+    0x0483,  # STMicroelectronics Virtual COM
+    0x2E8A,  # Raspberry Pi RP2040
+    0x303A,  # Espressif ESP32
+    0x1366,  # SEGGER
 }
 
 # Known Arduino Product IDs
@@ -124,16 +129,19 @@ class SerialManager:
         if "unknown" in desc:
             return False
 
-        # 1. Match by hardware USB Vendor ID (Official Arduino, CH340, CP210x, FTDI)
-        # Note: On Windows, CH340 drivers often report description as 'n/a' while VID is 0x1A86!
+        # 1. Match by hardware USB Vendor ID (Official Arduino, CH340, CP210x, FTDI, etc.)
         if getattr(p, "vid", None) in ARDUINO_VIDS:
             return True
 
-        # 2. Match by descriptive keywords if description is populated
-        if p.description and p.description != "n/a":
-            arduino_keywords = ["arduino", "ch340", "cp210", "ftdi", "mega 2560", "atmega", "usb serial", "usb-serial", "usb_serial"]
-            if any(kw in desc or kw in mfg or kw in hwid for kw in arduino_keywords):
-                return True
+        # 2. Match by descriptive keywords
+        arduino_keywords = [
+            "arduino", "ch340", "ch341", "ch34", "cp210", "cp21", "ftdi",
+            "mega 2560", "mega", "uno", "atmega", "usb serial", "usb-serial",
+            "usb_serial", "usb2.0-serial", "usb-to-serial", "serial port",
+            "serial device", "prolific", "wch"
+        ]
+        if any(kw in desc or kw in mfg or kw in hwid for kw in arduino_keywords):
+            return True
 
         return False
 
@@ -169,6 +177,14 @@ class SerialManager:
                 logger.info(f"[SERIAL DETECT] Auto-detected Arduino by description: {p.device} ({p.description})")
                 self.state = ConnectionState.DETECTED
                 return p
+
+        # 4. Fallback: If only 1 valid USB candidate port exists on this laptop, auto-select it
+        valid_candidates = [p for p in ports if self._is_valid_arduino(p)]
+        if len(valid_candidates) == 1:
+            chosen = valid_candidates[0]
+            logger.info(f"[SERIAL DETECT] Auto-selecting single candidate port: {chosen.device} ({chosen.description})")
+            self.state = ConnectionState.DETECTED
+            return chosen
 
         logger.warning(f"[SERIAL DETECT] No valid Arduino found among available ports: {[p.device for p in ports]}")
         return None
@@ -254,7 +270,11 @@ class SerialManager:
             error_str = str(e)
             if "Access is denied" in error_str or "PermissionError" in error_str:
                 self.last_error = "SERIAL_PORT_IN_USE"
-                logger.error(f"[SERIAL ERROR] timestamp={datetime.now().isoformat()} Access denied to {self.port}. Is another program using it?")
+                logger.error("=" * 68)
+                logger.error(f" [ALERT] SERIAL PORT {self.port} IS BUSY / LOCKED BY ANOTHER PROGRAM!")
+                logger.error(" Arduino IDE Serial Monitor or another terminal is holding this COM port.")
+                logger.error(" >>> PLEASE CLOSE ARDUINO IDE SERIAL MONITOR TO STREAM TO APP! <<<")
+                logger.error("=" * 68)
             else:
                 self.last_error = "CONNECTION_FAILED"
                 logger.error(f"[SERIAL ERROR] timestamp={datetime.now().isoformat()} Failed to connect to {self.port}: {e}")
@@ -451,7 +471,7 @@ class SerialManager:
                     self.last_line_time = datetime.now()
 
                     if line.startswith('{'):
-                        logger.debug(f"[SERIAL RAW]\n{line}")
+                        logger.info(f"[HOP 1: SERIAL RX] line={line[:120]}")
                         try:
                             data = json.loads(line)
                             
@@ -461,19 +481,20 @@ class SerialManager:
                             if is_valid and packet:
                                 self.last_packet = datetime.now()
                                 self.packets_received += 1
+                                pkt_dict = packet.model_dump()
+                                pkt_dict["source"] = "serial"
+                                pkt_dict["is_simulated"] = False
+                                pkt_dict["raw_packet"] = line
+                                pkt_dict["checksum_valid"] = True
+                                logger.info(f"[HOP 2: PARSER OK] cattle_id={pkt_dict.get('cattle_id')} seq={pkt_dict.get('sequence')} chk_valid=True")
                                 if self.on_data_callback:
-                                    pkt_dict = packet.model_dump()
-                                    pkt_dict["source"] = "serial"
-                                    pkt_dict["is_simulated"] = False
-                                    pkt_dict["raw_packet"] = line
-                                    pkt_dict["checksum_valid"] = True
                                     try:
                                         self.on_data_callback(pkt_dict)
                                     except Exception as cb_err:
                                         logger.error(f"[SERIAL CALLBACK ERROR] timestamp={datetime.now().isoformat()} error={cb_err}", exc_info=True)
                             else:
                                 self.packets_rejected += 1
-                                logger.warning(f"[SERIAL PARSE REJECTED] timestamp={datetime.now().isoformat()} reason={reason} line={line[:100]}")
+                                logger.warning(f"[HOP 2: PARSER REJECT] reason={reason} line={line[:100]}")
 
                         except json.JSONDecodeError as jde:
                             self.packets_rejected += 1

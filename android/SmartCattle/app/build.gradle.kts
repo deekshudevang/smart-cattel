@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.smartcattle"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
         buildConfigField("String", "DEV_LAN_IP", "\"192.168.1.5\"")
     }
 

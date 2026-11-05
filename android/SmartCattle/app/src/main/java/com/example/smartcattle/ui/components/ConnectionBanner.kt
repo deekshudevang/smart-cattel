@@ -35,6 +35,8 @@ fun ConnectionBanner(
     modifier: Modifier = Modifier,
     isReconnecting: Boolean = false,
     lastUpdateText: String? = null,
+    lastCattleId: String? = null,
+    connectionDetail: String? = null,
     onConfigureClick: () -> Unit,
     onRetryClick: () -> Unit
 ) {
@@ -109,16 +111,23 @@ fun ConnectionBanner(
                         overflow = TextOverflow.Ellipsis
                     )
 
-                    val secondaryText = if (!lastUpdateText.isNullOrBlank()) {
-                        "${stringResource(R.string.last_sync)} $lastUpdateText"
-                    } else {
-                        serverUrl
-                    }
-
                     Text(
-                        text = secondaryText,
+                        text = serverUrl,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    val diagText = if (!lastUpdateText.isNullOrBlank()) {
+                        "Last: $lastUpdateText • Cow: ${lastCattleId ?: "None"}"
+                    } else {
+                        "Last: None • Waiting for Arduino stream"
+                    }
+                    Text(
+                        text = diagText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isConnected) healthColors.healthy else MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )

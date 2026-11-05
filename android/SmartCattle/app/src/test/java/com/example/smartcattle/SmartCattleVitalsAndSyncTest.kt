@@ -716,12 +716,10 @@ class SmartCattleVitalsAndSyncTest {
             Sensor("🧪", "pH Level", "6.8", "", "Normal", androidx.compose.ui.graphics.Color.Green),
             Sensor("☀️", "Light", "850", "lux", "Normal", androidx.compose.ui.graphics.Color.Green),
             Sensor("⚖️", "Weight", "450.0", "kg", "Stable", androidx.compose.ui.graphics.Color.Green),
-            Sensor("👣", "Steps", "150", "steps", "Active", androidx.compose.ui.graphics.Color.Green),
-            Sensor("📈", "Total Steps", "1250", "steps", "Tracking", androidx.compose.ui.graphics.Color.Green),
             Sensor("🏃", "MEMS Accelerometer", "X:0.1 Y:-0.0 Z:9.8", "m/s²", "Active", androidx.compose.ui.graphics.Color.Green)
         )
 
-        assertEquals("Dashboard must contain exactly 9 sensor categories", 9, sensors.size)
+        assertEquals("Dashboard must contain exactly 7 sensor categories", 7, sensors.size)
 
         val labels = sensors.map { it.label }
         assertTrue("Must contain Heart Rate", labels.contains("Heart Rate"))
@@ -730,8 +728,6 @@ class SmartCattleVitalsAndSyncTest {
         assertTrue("Must contain pH Level", labels.contains("pH Level"))
         assertTrue("Must contain Light", labels.contains("Light"))
         assertTrue("Must contain Weight", labels.contains("Weight"))
-        assertTrue("Must contain Steps", labels.contains("Steps"))
-        assertTrue("Must contain Total Steps", labels.contains("Total Steps"))
         assertTrue("Must contain combined MEMS Accelerometer", labels.contains("MEMS Accelerometer"))
 
         assertFalse("Must NOT have separate MEMS X card", labels.contains("MEMS X"))

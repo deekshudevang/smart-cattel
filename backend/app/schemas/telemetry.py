@@ -133,9 +133,9 @@ class TelemetryPacket(BaseModel):
         if not isinstance(data, dict):
             return data
         
-        # 1. Cattle ID fallback
-        if not data.get("cattle_id"):
-            data["cattle_id"] = data.get("device_id", "CATTLE-001")
+        # 1. Cattle ID fallback and normalization
+        cid = data.get("cattle_id") or data.get("device_id") or "CATTLE-001"
+        data["cattle_id"] = str(cid).strip().upper()
 
         # 2. Step counting alias mapping
         if data.get("step_count_today") is None and data.get("steps_today") is not None:

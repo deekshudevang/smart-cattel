@@ -363,6 +363,12 @@ class CattleViewModel : ViewModel() {
     private val _lastUpdateTimestamp = MutableStateFlow<String?>(null)
     val lastUpdateTimestamp: StateFlow<String?> = _lastUpdateTimestamp.asStateFlow()
 
+    private val _lastPacketCattleId = MutableStateFlow<String?>(null)
+    val lastPacketCattleId: StateFlow<String?> = _lastPacketCattleId.asStateFlow()
+
+    private val _connectionDetail = MutableStateFlow<String?>("Connecting...")
+    val connectionDetail: StateFlow<String?> = _connectionDetail.asStateFlow()
+
     // Cows CRUD state
     private val _cowProfiles = MutableStateFlow<List<CowProfile>>(emptyList())
     val cowProfiles: StateFlow<List<CowProfile>> = _cowProfiles.asStateFlow()
@@ -480,8 +486,6 @@ class CattleViewModel : ViewModel() {
                                 Sensor("ph", "pH Level", p.latestPh?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available", "", "Normal", Green, isValid = p.latestPh != null, reason = if (p.latestPh == null) "Probe not in solution" else null),
                                 Sensor("ldr", "Light", p.latestLdr?.let { "$it" } ?: "Not Available", "lux", "Normal", Green, isValid = p.latestLdr != null, reason = if (p.latestLdr == null) "Sensor not connected" else null),
                                 Sensor("weight", "Weight", p.latestWeight?.let { String.format(Locale.US, "%.1f", it) } ?: "Not Available", "kg", "Cached", Green, isValid = p.latestWeight != null, reason = if (p.latestWeight == null) "Sensor not connected" else null),
-                                Sensor("steps", "Steps", p.latestStepsToday?.let { "$it" } ?: "Not Available", "steps", if (p.latestStepsToday != null) "Active" else "Offline", if (p.latestStepsToday != null) Green else Grey, isValid = p.latestStepsToday != null, reason = if (p.latestStepsToday == null) "Sensor not connected" else null),
-                                Sensor("total_steps", "Total Steps", p.latestStepsLifetime?.let { "$it" } ?: "Not Available", "steps", if (p.latestStepsLifetime != null) "Tracking" else "Offline", if (p.latestStepsLifetime != null) Green else Grey, isValid = p.latestStepsLifetime != null, reason = if (p.latestStepsLifetime == null) "Sensor not connected" else null),
                                 Sensor("mems", "MEMS Accelerometer", if (p.latestAccelX != null && p.latestAccelY != null && p.latestAccelZ != null) String.format(Locale.US, "X:%.1f Y:%.1f Z:%.1f", p.latestAccelX, p.latestAccelY, p.latestAccelZ) else "Not Available", "m/s²", "Cached", Green, isValid = p.latestAccelX != null, reason = if (p.latestAccelX == null) "Sensor not connected" else null)
                             ),
                             dataSource = "Cached",
@@ -519,8 +523,6 @@ class CattleViewModel : ViewModel() {
                                 Sensor("ph", "pH Level", "Not Available", "", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
                                 Sensor("ldr", "Light", "Not Available", "lux", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
                                 Sensor("weight", "Weight", "Not Available", "kg", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
-                                Sensor("steps", "Steps", "Not Available", "steps", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
-                                Sensor("total_steps", "Total Steps", "Not Available", "steps", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
                                 Sensor("mems", "MEMS Accelerometer", "Not Available", "m/s²", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream")
                             ),
                             dataSource = "Connecting...",
@@ -582,8 +584,6 @@ class CattleViewModel : ViewModel() {
                                     Sensor("ph", "pH Level", "Not Available", "", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
                                     Sensor("ldr", "Light", "Not Available", "lux", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
                                     Sensor("weight", "Weight", "Not Available", "kg", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
-                                    Sensor("steps", "Steps", "Not Available", "steps", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
-                                    Sensor("total_steps", "Total Steps", "Not Available", "steps", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
                                     Sensor("mems", "MEMS Accelerometer", "Not Available", "m/s²", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream")
                                 )
                             )
@@ -622,23 +622,90 @@ class CattleViewModel : ViewModel() {
     fun fetchCows() {
         viewModelScope.launch {
             try {
-                val list = api?.getCows() ?: return@launch
-                val profiles = list
-                    .filter { !deletedCattleIds.contains(it.cattle_id) }
-                    .map { it.toCowProfile(_photoPaths[it.cattle_id]) }
-                _cowProfiles.value = profiles
+                val cowsList = try { api?.getCows() ?: emptyList() } catch (e: Exception) {
+                    android.util.Log.w("SmartCattle", "getCows failed: ${e.message}")
+                    emptyList()
+                }
+                val cattleList = try { api?.getCattle() ?: emptyList() } catch (e: Exception) {
+                    android.util.Log.w("SmartCattle", "getCattle failed: ${e.message}")
+                    emptyList()
+                }
+
+                val currentProfiles = _cowProfiles.value.toMutableList()
+                val profileMap = currentProfiles.associateBy { it.cattleId.trim().uppercase(Locale.US) }.toMutableMap()
+
+                for (c in cowsList) {
+                    val cid = c.cattle_id.trim().uppercase(Locale.US)
+                    if (deletedCattleIds.contains(cid)) continue
+                    val existing = profileMap[cid]
+                    val updated = c.toCowProfile(_photoPaths[cid])
+                    profileMap[cid] = if (existing != null) {
+                        existing.copy(
+                            name = if (updated.name.isNotBlank()) updated.name else existing.name,
+                            breed = updated.breed ?: existing.breed,
+                            age = updated.age ?: existing.age,
+                            gender = updated.gender ?: existing.gender,
+                            dob = updated.dob ?: existing.dob,
+                            notes = updated.notes ?: existing.notes,
+                            overallStatus = updated.overallStatus ?: existing.overallStatus,
+                            latestWeight = updated.latestWeight ?: existing.latestWeight
+                        )
+                    } else {
+                        updated
+                    }
+                }
+
+                for (c in cattleList) {
+                    val cid = c.cattle_id.trim().uppercase(Locale.US)
+                    if (deletedCattleIds.contains(cid)) continue
+                    if (!profileMap.containsKey(cid)) {
+                        profileMap[cid] = CowProfile(
+                            cattleId = cid,
+                            name = if (c.name.isNotBlank()) c.name else cid,
+                            overallStatus = c.status
+                        )
+                    }
+                }
+
+                val merged = profileMap.values.toList()
+                _cowProfiles.value = merged
                 _cowError.value = null
 
-                // Ensure _cattle only retains active non-deleted cow profiles
-                val activeIds = profiles.map { it.cattleId }.toSet()
-                _cattle.value = _cattle.value.filter { it.id in activeIds && !deletedCattleIds.contains(it.id) }
-
-                // Save to Room cache
                 withContext(Dispatchers.IO) {
-                    cowDao?.insertAll(profiles.map { it.toEntity() })
+                    cowDao?.insertAll(merged.map { it.toEntity() })
+                }
+                android.util.Log.i("SmartCattle", "[HOP 7: VIEWMODEL ROOM SAVE] fetchCows loaded ${merged.size} cows: ${merged.map { it.cattleId }}")
+
+                if (_cattle.value.isEmpty() && merged.isNotEmpty()) {
+                    _cattle.value = merged.map { p ->
+                        Cattle(
+                            id = p.cattleId,
+                            name = p.name,
+                            breed = p.breed ?: "Not Available",
+                            age = p.age ?: "Not Available",
+                            overall = p.overallStatus ?: "Healthy",
+                            sensors = listOf(
+                                Sensor("hr", "Heart Rate", "Not Available", "bpm", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("spo2", "SpO2", "Not Available", "%", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("temp", "Body Temp", "Not Available", "°C", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("ph", "pH Level", "Not Available", "", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("ldr", "Light", "Not Available", "lux", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("weight", "Weight", "Not Available", "kg", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream"),
+                                Sensor("mems", "MEMS Accelerometer", "Not Available", "m/s²", "Offline", Grey, isValid = false, reason = "Awaiting hardware stream")
+                            ),
+                            dataSource = "Connecting...",
+                            isSimulated = false,
+                            isStale = true,
+                            lastUpdateFormatted = "Awaiting stream",
+                            fallDetected = false,
+                            weightStable = false,
+                            weightCalibrated = false
+                        )
+                    }
                 }
             } catch (e: Exception) {
                 _cowError.value = "Could not load cows: ${e.message}"
+                android.util.Log.e("SmartCattle", "fetchCows error: ${e.message}", e)
             }
         }
     }
@@ -814,8 +881,6 @@ class CattleViewModel : ViewModel() {
             Sensor("ph", "pH Level", phVal, "", sStatus(r.health.ph), sColor(r.health.ph), isValid = phVal != "Not Available", reason = phReason),
             Sensor("ldr", "Light", ldrVal, "lux", sStatus(r.health.ldr), sColor(r.health.ldr), isValid = ldrVal != "Not Available", reason = ldrReason),
             Sensor("weight", "Weight", weightVal, "kg", weightStatus, weightColor, isValid = weightVal != "Not Available", reason = weightReason),
-            Sensor("steps", "Steps", stepsTodayVal, "steps", stepsTodayStatus, stepsTodayColor, isValid = stepsTodayVal != "Not Available", reason = stepsTodayReason),
-            Sensor("total_steps", "Total Steps", totalStepsVal, "steps", totalStepsStatus, totalStepsColor, isValid = totalStepsVal != "Not Available", reason = totalStepsReason),
             Sensor("mems", "MEMS Accelerometer", accelStr, "m/s²", if (fallDetected) "Fall Detected" else sStatus(r.health.mems), if (fallDetected) Red else sColor(r.health.mems), isValid = accelStr != "Not Available", reason = accelReason)
         )
         val overall = if (r.health.overall == "abnormal") "At Risk" else "Healthy"
@@ -961,6 +1026,7 @@ class CattleViewModel : ViewModel() {
             override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
                 viewModelScope.launch(Dispatchers.Main) {
                     _isConnected.value = true
+                    _connectionDetail.value = "Connected"
                     reconnectAttempt = 0
                     reconnectJob?.cancel()
                     android.util.Log.i("SmartCattle", "[ANDROID WS] OPEN → connected=true")
@@ -986,11 +1052,13 @@ class CattleViewModel : ViewModel() {
                         val json = envelope.optJSONObject("payload") ?: return@launch
 
                         if (json.optString("type") == "sensor_update") {
-                            val cid = json.optString("cattle_id", "")
+                            val cid = json.optString("cattle_id", "").trim().uppercase(Locale.US)
                             if (cid.isBlank() || deletedCattleIds.contains(cid)) {
                                 android.util.Log.w("SmartCattle", "[ANDROID WS] Ignoring telemetry for deleted/blank cow: $cid")
                                 return@launch
                             }
+                            _lastPacketCattleId.value = cid
+                            android.util.Log.i("SmartCattle", "[HOP 6: ANDROID WS RX] cattle_id=$cid event_type=$eventType")
 
                             val activeProfiles = _cowProfiles.value
 
@@ -1112,8 +1180,6 @@ class CattleViewModel : ViewModel() {
                                 Sensor("ph", "pH Level", phVal, "", sStatus("ph"), sColor("ph"), isValid = phVal != "Not Available", reason = phReason),
                                 Sensor("ldr", "Light", ldrVal, "lux", sStatus("ldr"), sColor("ldr"), isValid = ldrVal != "Not Available", reason = ldrReason),
                                 Sensor("weight", "Weight", weightVal, "kg", weightStatus, weightColor, isValid = weightVal != "Not Available", reason = weightReason),
-                                Sensor("steps", "Steps", stepsTodayVal, "steps", stepsTodayStatus, stepsTodayColor, isValid = stepsTodayVal != "Not Available", reason = stepsTodayReason),
-                                Sensor("total_steps", "Total Steps", totalStepsVal, "steps", totalStepsStatus, totalStepsColor, isValid = totalStepsVal != "Not Available", reason = totalStepsReason),
                                 Sensor("mems", "MEMS Accelerometer", accelStr, "m/s²", memsStatus, memsColor, isValid = accelStr != "Not Available", reason = accelReason)
                             )
                             val overall = if (overallStatus == "abnormal") "At Risk" else "Healthy"
@@ -1188,9 +1254,11 @@ class CattleViewModel : ViewModel() {
                                 currentProfiles[pIdx] = profileToSave
                             }
                             _cowProfiles.value = currentProfiles
+                            android.util.Log.i("SmartCattle", "[HOP 8: UI STATE UPDATED] cattle_count=${currentCattle.size} profiles_count=${currentProfiles.size} last_cid=$cid")
                             withContext(Dispatchers.IO) {
                                 cowDao?.insertOrUpdate(profileToSave.toEntity())
                             }
+                            android.util.Log.i("SmartCattle", "[HOP 7: VIEWMODEL ROOM SAVE] cattle_id=$cid name=${profileToSave.name} saved_to_room=true")
 
                             val fallIcon = if (fallDetected) "FALL" else ""
                             val newRow = listOf(t, spo2Val, hrVal, tempVal,
@@ -1227,9 +1295,12 @@ class CattleViewModel : ViewModel() {
                 reconnect(url)
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                _isConnected.value = false
-                android.util.Log.e("SmartCattle", "[ANDROID WS FAILURE] error=${t.message}")
-                reconnect(url)
+                viewModelScope.launch(Dispatchers.Main) {
+                    _isConnected.value = false
+                    _connectionDetail.value = "Connection Failed (${t.message ?: "Check IP & Port"})"
+                    android.util.Log.e("SmartCattle", "[ANDROID WS FAILURE] error=${t.message}")
+                    reconnect(url)
+                }
             }
         })
     }
@@ -1708,10 +1779,12 @@ fun DashboardTab(
     val cowProfiles by viewModel.cowProfiles.collectAsState()
     val isConnected by viewModel.isConnected.collectAsState()
     val lastUpdate by viewModel.lastUpdateTimestamp.collectAsState()
+    val lastCattleId by viewModel.lastPacketCattleId.collectAsState()
+    val connectionDetail by viewModel.connectionDetail.collectAsState()
 
-    val activeIds = remember(cowProfiles) { cowProfiles.map { it.cattleId }.toSet() }
+    val activeIds = remember(cowProfiles) { cowProfiles.map { it.cattleId.trim().uppercase(Locale.US) }.toSet() }
     val displayCattle = remember(cattleList, activeIds) {
-        if (activeIds.isEmpty()) cattleList else cattleList.filter { it.id in activeIds }
+        if (activeIds.isEmpty()) cattleList else cattleList.filter { it.id.trim().uppercase(Locale.US) in activeIds }
     }
 
     Column(
@@ -1726,6 +1799,8 @@ fun DashboardTab(
             isConnected = isConnected,
             serverUrl = "ws://${viewModel.currentIp}:${viewModel.currentPort}/ws/cattle/CATTLE-ALL",
             lastUpdateText = lastUpdate,
+            lastCattleId = lastCattleId,
+            connectionDetail = connectionDetail,
             onConfigureClick = onOpenSettings,
             onRetryClick = { viewModel.retryConnection() }
         )
@@ -2130,44 +2205,7 @@ fun CattleTelemetrySection(cattle: Cattle, onOpenWeight: (String) -> Unit = {}) 
                     }
                 }
 
-                // ROW 4: Steps | Total Steps
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(spacing.sm)
-                ) {
-                    Box(modifier = Modifier.weight(1f)) {
-                        val s = stepsSensor
-                        val resolvedVal = s?.value ?: (cattle.stepsToday?.toString() ?: "Not Available")
-                        val valStr = if (cattle.isStale && s == null && cattle.stepsToday == null) "Not Available" else resolvedVal
-                        MetricCard(
-                            label = "Steps",
-                            value = valStr,
-                            unit = if (valStr == "Not Available") "" else "steps",
-                            icon = Icons.Default.DirectionsWalk,
-                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: (if (valStr != "Not Available") "Active" else "Offline"),
-                            statusColor = if (cattle.isStale) Grey else s?.color ?: (if (valStr != "Not Available") Green else Grey),
-                            isValid = (s?.isValid == true || cattle.stepsToday != null) && valStr != "Not Available" && !cattle.isStale,
-                            subtitle = if (cattle.isStale) "Disconnected" else s?.reason ?: "Today's steps"
-                        )
-                    }
-                    Box(modifier = Modifier.weight(1f)) {
-                        val s = totalStepsSensor
-                        val resolvedVal = s?.value ?: (cattle.stepsLifetime?.toString() ?: "Not Available")
-                        val valStr = if (cattle.isStale && s == null && cattle.stepsLifetime == null) "Not Available" else resolvedVal
-                        MetricCard(
-                            label = "Total Steps",
-                            value = valStr,
-                            unit = if (valStr == "Not Available") "" else "steps",
-                            icon = Icons.Default.Timeline,
-                            statusText = if (cattle.isStale) "Disconnected" else s?.status ?: (if (valStr != "Not Available") "Tracking" else "Offline"),
-                            statusColor = if (cattle.isStale) Grey else s?.color ?: (if (valStr != "Not Available") Green else Grey),
-                            isValid = (s?.isValid == true || cattle.stepsLifetime != null) && valStr != "Not Available" && !cattle.isStale,
-                            subtitle = if (cattle.isStale) "Disconnected" else s?.reason ?: "Cumulative"
-                        )
-                    }
-                }
-
-                // ROW 5: MEMS Accelerometer — ONE full-width combined card with X-Axis | Y-Axis | Z-Axis
+                // ROW 4: MEMS Accelerometer — ONE full-width combined card with X-Axis | Y-Axis | Z-Axis (Card 7 of 7)
                 MemsDashboardCard(
                     x = cattle.memsX,
                     y = cattle.memsY,

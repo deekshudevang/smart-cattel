@@ -6,25 +6,66 @@ echo ======================================================================
 echo           Smart Cattle Health Monitoring - Backend Server
 echo ======================================================================
 
-:: 1. Locate Python Interpreter in Virtual Environment
-if exist "%~dp0venv\Scripts\python.exe" (
-    set "PYTHON_EXE=%~dp0venv\Scripts\python.exe"
-) else if exist "%~dp0backend\venv\Scripts\python.exe" (
-    set "PYTHON_EXE=%~dp0backend\venv\Scripts\python.exe"
-) else (
-    where python >nul 2>&1
+:: 1. Locate a working Python Interpreter (with automatic recovery from copied venvs)
+set "PYTHON_EXE="
+set "SYSTEM_PYTHON="
+
+:: Check system python
+where python >nul 2>&1
+if not errorlevel 1 (
+    python -V >nul 2>&1
+    if not errorlevel 1 set "SYSTEM_PYTHON=python"
+)
+if not defined SYSTEM_PYTHON (
+    where py >nul 2>&1
     if not errorlevel 1 (
-        set "PYTHON_EXE=python"
+        py -3 -V >nul 2>&1
+        if not errorlevel 1 set "SYSTEM_PYTHON=py -3"
+    )
+)
+
+:: Check venv, but verify it is NOT a broken copy from another computer
+if exist "%~dp0venv\Scripts\python.exe" (
+    "%~dp0venv\Scripts\python.exe" -V >nul 2>&1
+    if not errorlevel 1 (
+        set "PYTHON_EXE=%~dp0venv\Scripts\python.exe"
     ) else (
-        where py >nul 2>&1
+        echo [WARN] Stale/copied virtual environment detected from another PC.
+        echo Rebuilding clean local virtual environment for this machine...
+        rd /s /q "%~dp0venv" >nul 2>&1
+    )
+)
+
+if not defined PYTHON_EXE (
+    if exist "%~dp0backend\venv\Scripts\python.exe" (
+        "%~dp0backend\venv\Scripts\python.exe" -V >nul 2>&1
         if not errorlevel 1 (
-            set "PYTHON_EXE=py"
+            set "PYTHON_EXE=%~dp0backend\venv\Scripts\python.exe"
         ) else (
-            echo [ERROR] Python environment not found!
-            echo Please ensure Python or venv is installed.
-            pause
-            exit /b 1
+            echo [WARN] Stale/copied backend\venv detected. Cleaning up...
+            rd /s /q "%~dp0backend\venv" >nul 2>&1
         )
+    )
+)
+
+:: If no valid venv, create one using system python or use system python directly
+if not defined PYTHON_EXE (
+    if defined SYSTEM_PYTHON (
+        echo [INFO] Setting up local virtual environment for this computer...
+        %SYSTEM_PYTHON% -m venv "%~dp0venv"
+        if exist "%~dp0venv\Scripts\python.exe" (
+            set "PYTHON_EXE=%~dp0venv\Scripts\python.exe"
+        ) else (
+            set "PYTHON_EXE=%SYSTEM_PYTHON%"
+        )
+    ) else (
+        echo ======================================================================
+        echo [ERROR] Python environment not found on this computer!
+        echo Please install Python 3.10+ from https://www.python.org/
+        echo IMPORTANT: Check the box "Add python.exe to PATH" during installation.
+        echo ======================================================================
+        pause
+        exit /b 1
     )
 )
 
@@ -72,6 +113,7 @@ echo.
 echo ----------------------------------------------------------------------
 echo  Server Ready for 1-Click Connection:
 echo    * Local Dashboard:  http://localhost:8000
+echo    * Health Check:     http://%LAN_IP%:8000/health
 echo    * Swagger API Docs: http://localhost:8000/docs
 echo    * Android App IP:   %LAN_IP%
 echo    * App Base URL:     http://%LAN_IP%:8000/
