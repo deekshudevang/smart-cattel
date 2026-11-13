@@ -24,26 +24,42 @@ if not defined SYSTEM_PYTHON (
     )
 )
 
-:: Check venv, but verify it is NOT a broken copy from another computer
+:: Check root venv, and verify it can run scripts and pip on THIS machine
 if exist "%~dp0venv\Scripts\python.exe" (
-    "%~dp0venv\Scripts\python.exe" -V >nul 2>&1
-    if not errorlevel 1 (
-        set "PYTHON_EXE=%~dp0venv\Scripts\python.exe"
-    ) else (
+    "%~dp0venv\Scripts\python.exe" -c "import sys, encodings" >nul 2>&1
+    if errorlevel 1 (
         echo [WARN] Stale/copied virtual environment detected from another PC.
         echo Rebuilding clean local virtual environment for this machine...
         rd /s /q "%~dp0venv" >nul 2>&1
+    ) else (
+        "%~dp0venv\Scripts\python.exe" -m pip --version >nul 2>&1
+        if errorlevel 1 (
+            echo [WARN] Incompatible pip detected in copied venv.
+            echo Rebuilding clean local virtual environment for this machine...
+            rd /s /q "%~dp0venv" >nul 2>&1
+        ) else (
+            set "PYTHON_EXE=%~dp0venv\Scripts\python.exe"
+        )
     )
 )
 
+:: Check backend\venv if root venv not used
 if not defined PYTHON_EXE (
     if exist "%~dp0backend\venv\Scripts\python.exe" (
-        "%~dp0backend\venv\Scripts\python.exe" -V >nul 2>&1
-        if not errorlevel 1 (
-            set "PYTHON_EXE=%~dp0backend\venv\Scripts\python.exe"
-        ) else (
-            echo [WARN] Stale/copied backend\venv detected. Cleaning up...
+        "%~dp0backend\venv\Scripts\python.exe" -c "import sys, encodings" >nul 2>&1
+        if errorlevel 1 (
+            echo [WARN] Stale/copied backend\venv detected from another PC.
+            echo Rebuilding clean local virtual environment for this machine...
             rd /s /q "%~dp0backend\venv" >nul 2>&1
+        ) else (
+            "%~dp0backend\venv\Scripts\python.exe" -m pip --version >nul 2>&1
+            if errorlevel 1 (
+                echo [WARN] Incompatible pip detected in copied backend\venv.
+                echo Rebuilding clean local virtual environment for this machine...
+                rd /s /q "%~dp0backend\venv" >nul 2>&1
+            ) else (
+                set "PYTHON_EXE=%~dp0backend\venv\Scripts\python.exe"
+            )
         )
     )
 )
@@ -67,6 +83,22 @@ if not defined PYTHON_EXE (
         pause
         exit /b 1
     )
+)
+
+:: Auto-initialize .env configuration if missing
+if not exist "%~dp0.env" (
+    if exist "%~dp0.env.example" (
+        copy "%~dp0.env.example" "%~dp0.env" >nul
+        echo [INFO] Initialized root .env from .env.example
+    )
+)
+if not exist "%~dp0backend\.env" (
+    if exist "%~dp0.env" (
+        copy "%~dp0.env" "%~dp0backend\.env" >nul
+    ) else if exist "%~dp0.env.example" (
+        copy "%~dp0.env.example" "%~dp0backend\.env" >nul
+    )
+    echo [INFO] Initialized backend\.env configuration
 )
 
 :: 2. Fast Dependency Check (Starts in 1 second; skips pip if already installed)

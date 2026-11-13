@@ -151,3 +151,4 @@ def test_get_thresholds_endpoint():
     assert "heart_rate" in data
     assert "spo2" in data
     assert "ph" in data
+
