@@ -302,3 +302,4 @@ def test_sms_config_and_logs_endpoints():
     logs = res_logs.json()
     assert len(logs) >= 1
     assert logs[0]["alert_type"] == "TEST"
+

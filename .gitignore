@@ -3,7 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.env
 venv/
 env/
 .venv/
@@ -16,7 +15,6 @@ backups/
 local.properties
 Nexus-Support/
 stacktrace.txt
-test_serial_raw*.py
 
 # Android
 *.iml

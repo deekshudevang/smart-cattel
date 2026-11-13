@@ -568,3 +568,4 @@ class SmsAlertManager:
 
 
 sms_service = SmsAlertManager
+
