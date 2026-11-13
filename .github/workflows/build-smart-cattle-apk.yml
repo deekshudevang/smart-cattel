@@ -1,4 +1,4 @@
-name: Build Smart Cattle Debug APK
+name: Build Smart Cattle Install-Fix APK
 
 on:
   push:
@@ -25,16 +25,25 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build debug APK
+      - name: Build install-fix APK
         working-directory: android/SmartCattle
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon :app:assembleDebug
+          ./gradlew --no-daemon clean :app:assembleDebug
 
-      - name: Upload debug APK
+      - name: Verify APK alignment and signature
+        working-directory: android/SmartCattle
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          "$BUILD_TOOLS/zipalign" -c -v 4 "$APK"
+          "$BUILD_TOOLS/apksigner" verify --verbose "$APK"
+          test -s "$APK"
+
+      - name: Verify and upload install-fix APK
         uses: actions/upload-artifact@v4
         with:
-          name: smart-cattle-debug-apk
+          name: smart-cattle-install-fix-apk
           path: android/SmartCattle/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
