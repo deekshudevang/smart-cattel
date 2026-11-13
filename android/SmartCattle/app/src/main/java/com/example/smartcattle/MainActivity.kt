@@ -353,6 +353,10 @@ class CattleViewModel : ViewModel() {
 
     private val _alerts = MutableStateFlow<List<Alert>>(emptyList())
     val alerts: StateFlow<List<Alert>> = _alerts.asStateFlow()
+    private val _popupAlert = MutableStateFlow<Alert?>(null)
+    val popupAlert: StateFlow<Alert?> = _popupAlert.asStateFlow()
+    private val lastAbnormalStateByCow = mutableMapOf<String, Boolean>()
+    fun dismissPopupAlert() { _popupAlert.value = null }
 
     private val _history = MutableStateFlow<List<List<String>>>(emptyList())
     val history: StateFlow<List<List<String>>> = _history.asStateFlow()
@@ -1269,17 +1273,28 @@ class CattleViewModel : ViewModel() {
 
                             if (overall == "At Risk") {
                                 val alertDetails = buildString {
-                                    if (health.optJSONObject("spo2")?.optString("status") == "abnormal") append("SpO2 abnormal ($spo2Val%) • ")
-                                    if (health.optJSONObject("heart_rate")?.optString("status") == "abnormal") append("Heart Rate abnormal ($hrVal bpm) • ")
-                                    if (health.optJSONObject("temperature")?.optString("status") == "abnormal") append("Temp abnormal ($tempVal°C) • ")
-                                    if (health.optJSONObject("ph")?.optString("status") == "abnormal") append("pH abnormal ($phVal) • ")
+                                    if (health.optJSONObject("spo2")?.optString("status") == "abnormal" && spo2Val != "Not Available") append("SpO2 abnormal ($spo2Val%) • ")
+                                    if (health.optJSONObject("heart_rate")?.optString("status") == "abnormal" && hrVal != "Not Available") append("Heart Rate abnormal ($hrVal bpm) • ")
+                                    if (health.optJSONObject("temperature")?.optString("status") == "abnormal" && tempVal != "Not Available") append("Temp abnormal ($tempVal°C) • ")
+                                    if (health.optJSONObject("ph")?.optString("status") == "abnormal" && phVal != "Not Available") append("pH abnormal ($phVal) • ")
+                                    if (health.optJSONObject("ldr")?.optString("status") == "abnormal" && ldrVal != "Not Available") append("Light abnormal ($ldrVal lux) • ")
                                     if (fallDetected) append("Fall Detected! ")
+                                    else if (health.optJSONObject("mems")?.optString("status") == "abnormal" && accelStr != "Not Available") append("Accelerometer abnormal ($accelStr) • ")
                                 }.trimEnd(' ', '•')
                                 val msg = alertDetails.ifEmpty { "Abnormal readings for $cid" }
                                 val tag = if (fallDetected) "FALL" else "WARNING"
                                 val color = if (fallDetected) Red else Orange
                                 val currentAlertTime = SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.getDefault()).format(Date())
-                                _alerts.value = (listOf(Alert(cid, msg, currentAlertTime, tag, color)) + _alerts.value).take(10)
+                                val alert = Alert(cid, msg, currentAlertTime, tag, color)
+                                _alerts.value = (listOf(alert) + _alerts.value).take(10)
+
+                                // Show one popup on the normal -> abnormal transition, not for every telemetry packet.
+                                if (lastAbnormalStateByCow[cid] != true) {
+                                    _popupAlert.value = alert
+                                }
+                                lastAbnormalStateByCow[cid] = true
+                            } else {
+                                lastAbnormalStateByCow[cid] = false
                             }
                         }
                     } catch (e: Exception) {
@@ -1371,6 +1386,7 @@ fun SmartCattleApp() {
     var port by remember { mutableStateOf(prefs.getString("backend_port", "8000") ?: "8000") }
 
     val viewModel: CattleViewModel = viewModel()
+    val popupAlert by viewModel.popupAlert.collectAsState()
 
     LaunchedEffect(Unit) {
         viewModel.initLocalCache(context)
@@ -1425,6 +1441,49 @@ fun SmartCattleApp() {
 
                     viewModel.configureIp(newIp, newPort)
                     showSettingsDialog = false
+                }
+            )
+        }
+
+        popupAlert?.let { alert ->
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissPopupAlert() },
+                icon = {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(34.dp)
+                    )
+                },
+                title = {
+                    Text(
+                        text = "Abnormal Reading Detected",
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Cattle: ${alert.cattle}", fontWeight = FontWeight.SemiBold)
+                        Text(alert.msg)
+                        Text(
+                            "Check the animal and verify the sensor reading.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(alert.time, style = MaterialTheme.typography.labelSmall)
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = { viewModel.dismissPopupAlert() }) {
+                        Text("Acknowledge")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { viewModel.dismissPopupAlert() }) {
+                        Text("Dismiss")
+                    }
                 }
             )
         }
