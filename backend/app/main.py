@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.database.database import engine, SessionLocal, get_db
 from app.database import models
 from websocket.manager import manager
-from config import settings
+from app.config import settings
 from services import SensorService, PredictionService
 from schemas.websocket import WebSocketEvent
 import redis.asyncio as redis_async
@@ -984,6 +984,88 @@ def mark_alert_resolved(alert_id: int, db: Session = Depends(get_db)):
     alert.resolved_at = datetime.utcnow()
     db.commit()
     return {"status": "ok", "alert_id": alert_id, "alert_status": "resolved"}
+
+@app.get("/api/sms/config")
+def get_sms_config():
+    from app.sms_service import validate_phone_number
+    target = getattr(settings, "target_phone_number", None) or getattr(settings, "ALERT_PHONE_NUMBER", None)
+    is_valid, normalized, err = validate_phone_number(target)
+    
+    # Mask phone for privacy in logs/APIs
+    masked = None
+    if normalized and len(normalized) >= 8:
+        masked = normalized[:3] + "******" + normalized[-4:]
+    elif target:
+        masked = target[:2] + "****" if len(target) > 2 else "****"
+        
+    return {
+        "sms_enabled": getattr(settings, "SMS_ALERT_ENABLED", True),
+        "phone_configured": is_valid,
+        "phone_number_masked": masked,
+        "phone_validation_error": err,
+        "provider": getattr(settings, "SMS_PROVIDER", "fast2sms")
+    }
+
+@app.get("/api/sms/logs")
+def get_sms_logs(limit: int = 50, db: Session = Depends(get_db)):
+    logs = db.query(models.SmsLog).order_by(models.SmsLog.timestamp.desc()).limit(limit).all()
+    return [
+        {
+            "id": l.id,
+            "cattle_id": l.cattle_id,
+            "alert_type": l.alert_type,
+            "severity": l.severity,
+            "timestamp": l.timestamp.isoformat() if l.timestamp else None,
+            "location": l.location,
+            "status": l.status,
+            "reason": l.reason,
+            "phone_number": l.phone_number,
+            "message": l.message,
+            "provider": l.provider,
+            "event_id": l.event_id
+        }
+        for l in logs
+    ]
+
+@app.post("/api/sms/test")
+def send_test_sms(db: Session = Depends(get_db)):
+    from app.sms_service import validate_phone_number, get_sms_provider, format_sms_message
+    target = getattr(settings, "target_phone_number", None) or getattr(settings, "ALERT_PHONE_NUMBER", None)
+    is_valid, normalized, err = validate_phone_number(target)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=f"Cannot send test SMS: {err}")
+
+    test_msg = format_sms_message(
+        cattle_id="TEST-COW",
+        sensor_name="Temperature",
+        reading_value="40.5°C",
+        severity="HIGH"
+    )
+    provider = get_sms_provider()
+    success, status, reason = provider.send_sms(normalized, test_msg)
+    
+    sms_log = models.SmsLog(
+        cattle_id="TEST-COW",
+        alert_type="TEST",
+        severity="HIGH",
+        timestamp=datetime.utcnow(),
+        status=status,
+        reason=reason,
+        phone_number=normalized,
+        message=test_msg,
+        provider=provider.name,
+        event_id="TEST-MANUAL"
+    )
+    db.add(sms_log)
+    db.commit()
+    
+    return {
+        "success": success,
+        "status": status,
+        "provider": provider.name,
+        "recipient": normalized,
+        "detail": reason
+    }
 
 @app.get("/api/dashboard/summary")
 def get_dashboard_summary(db: Session = Depends(get_db)):

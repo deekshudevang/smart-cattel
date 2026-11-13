@@ -298,6 +298,10 @@ class SmsLog(Base, BaseMixin):
     location = Column(String, nullable=True)
     status = Column(String, index=True) # attempted, sent, failed
     reason = Column(String, nullable=True)
+    phone_number = Column(String, nullable=True)
+    message = Column(String, nullable=True)
+    provider = Column(String, nullable=True)
+    event_id = Column(String, nullable=True, index=True)
     
     cattle = relationship("Cattle")
 

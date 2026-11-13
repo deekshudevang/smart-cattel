@@ -52,7 +52,7 @@ class EmergencySystem:
         )
 
         # Attempt to send SMS
-        status, reason = cls._send_sms(sms_text)
+        status, reason, phone_num, provider_name = cls._send_sms(sms_text)
 
         # Record attempt
         sms_log = SmsLog(
@@ -62,7 +62,10 @@ class EmergencySystem:
             timestamp=now,
             location=location_str,
             status=status,
-            reason=reason
+            reason=reason,
+            phone_number=phone_num,
+            message=sms_text,
+            provider=provider_name
         )
         db.add(sms_log)
         db.commit()
@@ -71,18 +74,22 @@ class EmergencySystem:
             cls._sms_cooldowns[event_key] = now
 
     @classmethod
-    def _send_sms(cls, message: str) -> tuple[str, str]:
+    def _send_sms(cls, message: str) -> tuple[str, str, str, str]:
         """
-        Dummy logic for sending SMS. Never hardcode the phone number here.
-        Returns: (status, reason)
-        status: 'attempted', 'sent', or 'failed'
+        Sends SMS via configured SMS provider.
+        Returns: (status, reason, phone_number, provider_name)
         """
-        # In a real system, this would fetch the target phone number from configuration or database
-        # phone_number = get_emergency_contact()
-        
-        # Simulate SMS sending
-        try:
-            print(f"--- SENDING SMS --- \n{message}\n-------------------")
-            return "sent", "SMS dispatched successfully"
-        except Exception as e:
-            return "failed", str(e)
+        from app.config import settings
+        from app.sms_service import validate_phone_number, get_sms_provider
+
+        if not getattr(settings, "SMS_ALERT_ENABLED", True):
+            return "skipped", "SMS alerts disabled in config", "", "none"
+
+        target_phone = getattr(settings, "target_phone_number", None) or getattr(settings, "ALERT_PHONE_NUMBER", None)
+        is_valid, normalized_phone, err = validate_phone_number(target_phone)
+        if not is_valid:
+            return "failed", err or "Invalid phone number", target_phone or "", "none"
+
+        provider = get_sms_provider()
+        success, status, reason = provider.send_sms(normalized_phone, message)
+        return status, reason or ("sent" if success else "failed"), normalized_phone, provider.name

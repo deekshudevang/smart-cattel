@@ -97,7 +97,70 @@ flowchart TD
    python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
    ```
 
-### 3. Finding Computer LAN IP & Android Setup
+### 3. Automatic SMS Alert System (Fast2SMS / Twilio / MSG91)
+
+The system automatically sends an SMS notification whenever an incoming sensor reading or health status becomes **ABNORMAL**.
+
+#### Workflow
+$$\text{Arduino Sensors} \longrightarrow \text{FastAPI Serial Ingest} \longrightarrow \text{Physiological Evaluation} \longrightarrow \text{Deduplication Check} \longrightarrow \text{Instant SMS Alert}$$
+
+#### Configuration
+Open `backend/app/config.py` or `.env` and set:
+```ini
+# Target recipient mobile number (International E.164 or 10-digit Indian number)
+ALERT_PHONE_NUMBER=+919876543210
+SMS_ALERT_ENABLED=true
+SMS_PROVIDER=fast2sms
+```
+
+#### Supported SMS Gateways
+1. **Fast2SMS (Recommended for India — Free & Instant):**
+   - Register at [fast2sms.com](https://www.fast2sms.com) and copy your Dev API Key.
+   - In `.env`:
+     ```ini
+     SMS_PROVIDER=fast2sms
+     FAST2SMS_API_KEY=your_fast2sms_api_key_here
+     ```
+2. **Twilio (International):**
+   - Register at [twilio.com](https://www.twilio.com).
+   - In `.env`:
+     ```ini
+     SMS_PROVIDER=twilio
+     TWILIO_ACCOUNT_SID=your_account_sid
+     TWILIO_AUTH_TOKEN=your_auth_token
+     TWILIO_FROM_NUMBER=+1XXXXXXXXXX
+     ```
+3. **Mock Provider (Offline / Testing):**
+   - In `.env`: `SMS_PROVIDER=mock`.
+   - Records sent messages in memory and logs them to console without consuming provider credits.
+
+#### SMS Message Format
+```text
+SMART CATTLE ALERT!
+
+Cow ID: CATTLE-001
+
+Condition: ABNORMAL
+
+Sensor: Temperature
+
+Current Reading: 40.8°C
+
+Severity: HIGH
+
+Time: 2026-11-13 21:05:00 IST
+
+Please check the animal immediately.
+```
+
+#### Deduplication & Anti-Spam Guard
+- **Single Alert on Onset:** Sends an SMS when a vital first exceeds physiological safety limits.
+- **Continuous Suppression:** While the animal remains abnormal at 40.8°C, repeat SMS alerts are suppressed to prevent spamming your phone.
+- **Recovery & Re-trigger:** Once the parameter returns to normal range and subsequently spikes again, a new SMS alert is dispatched.
+- **Separate Alerts:** If multiple parameters are abnormal (e.g. Temperature and Heart Rate), separate alerts with distinct event IDs are delivered.
+- **No Fake Data:** Simulated or null readings are strictly ignored and will never trigger SMS alerts.
+
+### 4. Finding Computer LAN IP & Android Setup
 1. On the PC running FastAPI, run `ipconfig` in Command Prompt or PowerShell and look for **IPv4 Address** (e.g., `192.168.1.5`).
 2. In the Android App, click the **Settings icon** on the top bar.
 3. Enter your PC's LAN IP (e.g., `192.168.1.5`). The app connects immediately to `ws://192.168.1.5:8000/ws/cattle/CATTLE-ALL`.

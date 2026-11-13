@@ -102,6 +102,20 @@ def ensure_sqlite_columns():
                         if "alert_type" in existing_alert_cols and "type" in existing_alert_cols:
                             conn.execute(text("UPDATE alerts SET type = alert_type WHERE type IS NULL AND alert_type IS NOT NULL"))
 
+                    sms_logs_res = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='sms_logs'"))
+                    if sms_logs_res.fetchone():
+                        sms_logs_info = conn.execute(text("PRAGMA table_info(sms_logs)")).fetchall()
+                        existing_sms_cols = {row[1] for row in sms_logs_info}
+                        sms_cols_to_add = [
+                            ("phone_number", "TEXT"),
+                            ("message", "TEXT"),
+                            ("provider", "TEXT"),
+                            ("event_id", "TEXT"),
+                        ]
+                        for col_name, col_type in sms_cols_to_add:
+                            if col_name not in existing_sms_cols:
+                                conn.execute(text(f"ALTER TABLE sms_logs ADD COLUMN {col_name} {col_type}"))
+
                     conn.commit()
         except Exception:
             pass

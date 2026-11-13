@@ -903,6 +903,22 @@ class SensorService:
                         db_r.rollback()
                     finally:
                         db_r.close()
+
+        # Automatic SMS Alert Integration
+        try:
+            from sms_service import sms_service
+            db_sms = SessionLocal()
+            try:
+                await sms_service.process_telemetry_for_sms(
+                    cattle_id=cattle_id,
+                    telemetry=validated_data,
+                    predictions=preds,
+                    db=db_sms
+                )
+            finally:
+                db_sms.close()
+        except Exception as sms_err:
+            logger.error(f"[SMS Pipeline Error] Failed to process SMS alerts: {sms_err}")
         
         await AlertService.broadcast_alert(manager, validated_data["cattle_id"], validated_data, preds, assessment)
         logger.info(f"[SENSOR SAVED] reading_id={reading_id} overall={'abnormal' if any(v.get('status')=='abnormal' for v in preds.values()) else 'normal'} risk={assessment.get('risk_level')}")
