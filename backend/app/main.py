@@ -802,9 +802,79 @@ def get_history(cattle_id: str, limit: int = Query(default=20), include_simulate
         })
     return result
 
+class AlertCreateRequest(BaseModel):
+    cattle_id: str
+    type: str
+    severity: str = "WARNING"
+    message: str
+    value: Optional[float] = None
+    threshold: Optional[str] = None
+    device_id: Optional[str] = None
+
+@app.get("/api/thresholds")
+def get_thresholds():
+    from thresholds import CATTLE_THRESHOLDS
+    return CATTLE_THRESHOLDS
+
 @app.get("/api/alerts")
-def get_alerts(db: Session = Depends(get_db)):
-    abnormal = db.query(models.Prediction).filter(models.Prediction.overall_status == "abnormal").order_by(models.Prediction.timestamp.desc()).limit(20).all()
+def get_alerts(
+    status: Optional[str] = None,
+    cattle_id: Optional[str] = None,
+    severity: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.Alert)
+    if status:
+        query = query.filter(models.Alert.status.ilike(status.strip()))
+    if cattle_id:
+        query = query.filter(models.Alert.cattle_id == cattle_id.strip().upper())
+    if severity:
+        query = query.filter(models.Alert.severity.ilike(severity.strip()))
+        
+    db_alerts = query.order_by(models.Alert.created_at.desc()).limit(limit).all()
+    
+    if db_alerts:
+        from thresholds import CATTLE_THRESHOLDS
+        results = []
+        for a in db_alerts:
+            cow = db.query(models.Cattle).filter(models.Cattle.cattle_id == a.cattle_id).first()
+            cow_name = cow.name if cow and cow.name else a.cattle_id
+            
+            ts = a.created_at or datetime.now(timezone.utc)
+            if getattr(ts, 'tzinfo', None) is None:
+                ts_utc = ts.replace(tzinfo=timezone.utc)
+            else:
+                ts_utc = ts
+            ts_iso = ts_utc.isoformat()
+            
+            # Recommendation lookup
+            sensor_key = (a.type or "").lower()
+            rec = "Inspect animal and provide supportive veterinary care."
+            if sensor_key in CATTLE_THRESHOLDS:
+                rec = CATTLE_THRESHOLDS[sensor_key].get("recommendation_high") or CATTLE_THRESHOLDS[sensor_key].get("recommendation_low") or rec
+            elif a.type == "FALL":
+                rec = CATTLE_THRESHOLDS.get("mems", {}).get("recommendation_fall", rec)
+                
+            results.append({
+                "id": a.id,
+                "cattle_id": a.cattle_id or "unknown",
+                "cattle_name": cow_name,
+                "timestamp": ts_iso,
+                "fall_detected": (a.type == "FALL"),
+                "details": [a.message] if a.message else [f"{a.type} abnormal"],
+                "type": a.type,
+                "sensor_type": a.type,
+                "severity": a.severity or "WARNING",
+                "status": a.status or "active",
+                "value": a.value,
+                "threshold": a.threshold,
+                "recommended_action": rec
+            })
+        return results
+
+    # Fallback to models.Prediction for environments/tests where models.Alert has not been populated
+    abnormal = db.query(models.Prediction).filter(models.Prediction.overall_status == "abnormal").order_by(models.Prediction.timestamp.desc()).limit(limit).all()
     alerts = []
     for p in abnormal:
         reading = db.query(models.SensorReading).filter(models.SensorReading.id == p.reading_id).first()
@@ -828,13 +898,92 @@ def get_alerts(db: Session = Depends(get_db)):
         ts_iso = ts_utc.isoformat()
 
         alerts.append({
+            "id": p.id,
             "cattle_id": reading.cattle_id if reading else "unknown",
             "cattle_name": cattle.name if cattle else "Unknown",
             "timestamp": ts_iso,
             "fall_detected": fall_detected,
             "details": details,
+            "type": "FALL" if fall_detected else "SENSOR_ABNORMAL",
+            "sensor_type": "FALL" if fall_detected else "SENSOR",
+            "severity": "CRITICAL" if fall_detected else "WARNING",
+            "status": "active",
+            "value": None,
+            "threshold": "Normal Range",
+            "recommended_action": "Check cow immediately for injury or abnormal vitals."
         })
     return alerts
+
+@app.post("/api/alerts", status_code=201)
+async def create_alert(req: AlertCreateRequest, db: Session = Depends(get_db)):
+    cid = req.cattle_id.strip().upper()
+    alert = models.Alert(
+        cattle_id=cid,
+        device_id=req.device_id or "MANUAL",
+        type=req.type.upper(),
+        severity=req.severity.upper(),
+        message=req.message,
+        value=req.value,
+        threshold=req.threshold,
+        status="active"
+    )
+    db.add(alert)
+    db.commit()
+    db.refresh(alert)
+    
+    # Broadcast over WebSocket
+    try:
+        cow = db.query(models.Cattle).filter(models.Cattle.cattle_id == cid).first()
+        cow_name = cow.name if cow and cow.name else cid
+        now_utc = datetime.now(timezone.utc)
+        evt_payload = {
+            "event_id": f"EVT-{cid}-{req.type.upper()}-{int(now_utc.timestamp()*1000)}",
+            "cattle_id": cid,
+            "cattle_name": cow_name,
+            "sensor_key": req.type.lower(),
+            "sensor_name": req.type.title(),
+            "current_value": str(req.value) if req.value is not None else "Abnormal",
+            "raw_value": req.value,
+            "status": "ABNORMAL",
+            "expected_range": req.threshold or "Normal bounds",
+            "timestamp": now_utc.isoformat(),
+            "severity": req.severity.upper(),
+            "recommended_action": req.message
+        }
+        from app.websocket.manager import manager as ws_mgr
+        ws_evt = ws_mgr.format_event(event_type="alert", payload=evt_payload, cattle_id=cid)
+        await ws_mgr.broadcast(ws_evt)
+    except Exception as e:
+        logger.warning(f"Failed to broadcast manually created alert: {e}")
+        
+    return {
+        "id": alert.id,
+        "cattle_id": alert.cattle_id,
+        "type": alert.type,
+        "severity": alert.severity,
+        "message": alert.message,
+        "status": alert.status
+    }
+
+@app.put("/api/alerts/{alert_id}/read")
+def mark_alert_read(alert_id: int, db: Session = Depends(get_db)):
+    alert = db.query(models.Alert).filter(models.Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    alert.status = "read"
+    alert.acknowledged_at = datetime.utcnow()
+    db.commit()
+    return {"status": "ok", "alert_id": alert_id, "alert_status": "read"}
+
+@app.put("/api/alerts/{alert_id}/resolve")
+def mark_alert_resolved(alert_id: int, db: Session = Depends(get_db)):
+    alert = db.query(models.Alert).filter(models.Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    alert.status = "resolved"
+    alert.resolved_at = datetime.utcnow()
+    db.commit()
+    return {"status": "ok", "alert_id": alert_id, "alert_status": "resolved"}
 
 @app.get("/api/dashboard/summary")
 def get_dashboard_summary(db: Session = Depends(get_db)):

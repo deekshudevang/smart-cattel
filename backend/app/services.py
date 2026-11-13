@@ -13,6 +13,7 @@ from fall_detection import fall_detector
 from engine import HealthRiskEngine
 from baseline_engine import BaselineEngine
 from alert_engine import AlertService as EngineAlertService, AlertType, AlertSeverity, AlertLifecycle
+from thresholds import evaluate_telemetry_health, CATTLE_THRESHOLDS
 
 class DatabaseService:
     @staticmethod
@@ -351,11 +352,61 @@ class AlertService:
         health_with_overall["fall_detected"] = fall_detected
         if assessment:
             health_with_overall["assessment"] = assessment
+
+        # Retrieve cow name for notifications
+        cow_name = cattle_id
+        try:
+            db_c = SessionLocal()
+            c_row = db_c.query(models.Cattle).filter(models.Cattle.cattle_id == cattle_id).first()
+            if c_row and c_row.name:
+                cow_name = c_row.name
+            db_c.close()
+        except Exception:
+            pass
+
+        sensor_name_map = {
+            "temperature": "Body Temperature",
+            "heart_rate": "Heart Rate",
+            "spo2": "SpO2",
+            "ph": "pH Level",
+            "mems": "Activity / Posture",
+            "ldr": "Ambient Light",
+            "weight": "Body Weight"
+        }
+
+        abnormal_events = []
+        now_utc = datetime.now(timezone.utc)
+        now_iso = now_utc.isoformat()
+        now_ms = int(now_utc.timestamp() * 1000)
+
+        for sensor_key, pred in preds.items():
+            if sensor_key == "overall":
+                continue
+            if isinstance(pred, dict) and pred.get("status") == "abnormal":
+                s_name = sensor_name_map.get(sensor_key, sensor_key.replace("_", " ").title())
+                raw_val = pred.get("value")
+                fmt_val = pred.get("formatted_value") or (f"{raw_val}" if raw_val is not None else "Abnormal")
+                abnormal_events.append({
+                    "event_id": f"EVT-{cattle_id}-{sensor_key.upper()}-{now_ms}",
+                    "cattle_id": cattle_id,
+                    "cattle_name": cow_name,
+                    "sensor_key": sensor_key,
+                    "sensor_name": s_name,
+                    "current_value": fmt_val,
+                    "raw_value": raw_val,
+                    "status": pred.get("direction", "ABNORMAL"),
+                    "expected_range": pred.get("expected_range", ""),
+                    "timestamp": now_iso,
+                    "severity": pred.get("severity", "WARNING"),
+                    "recommended_action": pred.get("recommendation", "Inspect animal and provide veterinary care.")
+                })
+
         payload = {
             "type": "sensor_update",
             "cattle_id": cattle_id,
             "data": data,
             "health": health_with_overall,
+            "abnormal_events": abnormal_events,
             "validity": data.get("validity", {}),
             "validity_reasons": data.get("validity_reasons", {}),
             "source": data.get("source", "serial"),
@@ -363,7 +414,7 @@ class AlertService:
         }
         import logging as _log
         _logger = _log.getLogger("alert_service")
-        _logger.info(f"[HOP 5: WS BROADCAST] cattle_id={cattle_id} clients={len(manager.active_connections)} overall={overall}")
+        _logger.info(f"[HOP 5: WS BROADCAST] cattle_id={cattle_id} clients={len(manager.active_connections)} overall={overall} abnormal_count={len(abnormal_events)}")
         _logger.info(
             f"[WS OUT] cattle={cattle_id} ldr={data.get('ldr')} "
             f"spo2={data.get('spo2')} bpm={data.get('bpm')} "
@@ -376,6 +427,18 @@ class AlertService:
                 cattle_id=cattle_id
             )
             await manager.broadcast(ws_event)
+
+            # Also broadcast individual dedicated alert events if new abnormalities exist
+            for evt in abnormal_events:
+                try:
+                    alert_event = manager.format_event(
+                        event_type="alert",
+                        payload=evt,
+                        cattle_id=cattle_id
+                    )
+                    await manager.broadcast(alert_event)
+                except Exception as _e:
+                    _logger.warning(f"Failed to broadcast dedicated alert event: {_e}")
         except Exception as e:
             print(f"Failed to broadcast alert: {e}")
 
@@ -396,6 +459,8 @@ class AlertService:
                 except ValueError:
                     val = None
                     
+            thresh = payload.get("threshold")
+            thresh_str = str(thresh) if thresh is not None else None
             alert = models.Alert(
                 cattle_id=payload.get("cattle_id"),
                 device_id=payload.get("device_id"),
@@ -403,9 +468,9 @@ class AlertService:
                 severity=payload.get("severity"),
                 message=payload.get("message"),
                 value=val,
-                threshold=payload.get("threshold"),
+                threshold=thresh_str,
                 confidence=payload.get("confidence"),
-                status=payload.get("status", AlertLifecycle.ACTIVE)
+                status=str(payload.get("status", "active")).lower()
             )
             db.add(alert)
             db.commit()
@@ -540,7 +605,22 @@ class PredictionService:
         self.predictor = HealthPredictor()
 
     def predict(self, data: dict) -> dict:
-        return self.predictor.predict(data)
+        preds = evaluate_telemetry_health(data)
+        try:
+            ml_preds = self.predictor.predict(data)
+            if isinstance(ml_preds, dict):
+                for k, v in ml_preds.items():
+                    if k != "overall" and isinstance(v, dict):
+                        if k not in preds:
+                            preds[k] = v
+                        else:
+                            preds[k].update(v)
+                if "overall" in ml_preds and isinstance(ml_preds["overall"], dict):
+                    if ml_preds["overall"].get("status") == "abnormal":
+                        preds["overall"]["status"] = "abnormal"
+        except Exception:
+            pass
+        return preds
 
 class SensorService:
     def __init__(self, prediction_service: PredictionService):
@@ -785,22 +865,44 @@ class SensorService:
             "activity": AlertType.ACTIVITY
         }
         for sensor, pred in preds.items():
-            if pred.get("status") == "abnormal" and sensor in mapping:
+            if sensor in mapping:
                 val = validated_data.get(sensor)
                 if val is None:
                     continue
-                s_payload = await EngineAlertService.process_alert_async(
-                    cattle_id=cattle_id,
-                    device_id=validated_data.get("device_id", "UNKNOWN"),
-                    alert_type=mapping[sensor],
-                    severity=AlertSeverity.WARNING,
-                    message=f"{sensor.upper()} is abnormal",
-                    value=val,
-                    confidence=0.8,
-                    websocket_manager=manager
-                )
-                if s_payload:
-                    AlertService.create_db_alert_from_payload(s_payload)
+                if pred.get("status") == "abnormal":
+                    severity = AlertSeverity.CRITICAL if pred.get("severity") == "CRITICAL" else AlertSeverity.WARNING
+                    s_payload = await EngineAlertService.process_alert_async(
+                        cattle_id=cattle_id,
+                        device_id=validated_data.get("device_id", "UNKNOWN"),
+                        alert_type=mapping[sensor],
+                        severity=severity,
+                        message=pred.get("reason", f"{sensor.upper()} is abnormal"),
+                        value=val,
+                        confidence=0.85,
+                        threshold=pred.get("expected_range"),
+                        websocket_manager=manager
+                    )
+                    if s_payload:
+                        AlertService.create_db_alert_from_payload(s_payload)
+                elif pred.get("status") == "normal":
+                    # Sensor recovered to normal: resolve previous alert in engine and DB
+                    EngineAlertService.resolve_alert(cattle_id, mapping[sensor])
+                    db_r = SessionLocal()
+                    try:
+                        active_alerts = db_r.query(models.Alert).filter(
+                            models.Alert.cattle_id == cattle_id,
+                            models.Alert.type == mapping[sensor],
+                            models.Alert.status == "active"
+                        ).all()
+                        for a in active_alerts:
+                            a.status = "resolved"
+                            a.resolved_at = datetime.utcnow()
+                        if active_alerts:
+                            db_r.commit()
+                    except Exception:
+                        db_r.rollback()
+                    finally:
+                        db_r.close()
         
         await AlertService.broadcast_alert(manager, validated_data["cattle_id"], validated_data, preds, assessment)
         logger.info(f"[SENSOR SAVED] reading_id={reading_id} overall={'abnormal' if any(v.get('status')=='abnormal' for v in preds.values()) else 'normal'} risk={assessment.get('risk_level')}")

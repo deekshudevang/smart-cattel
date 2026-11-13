@@ -172,7 +172,7 @@ class Alert(Base, BaseMixin):
     severity = Column(String, default="INFO", index=True)
     message = Column(String)
     value = Column(Float, nullable=True)
-    threshold = Column(Float, nullable=True)
+    threshold = Column(String, nullable=True)
     confidence = Column(Float, nullable=True)
     acknowledged_at = Column(DateTime, nullable=True)
     resolved_at = Column(DateTime, nullable=True)

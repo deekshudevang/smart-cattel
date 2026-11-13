@@ -84,9 +84,37 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 class MainActivity : ComponentActivity() {
+    private var pendingCattleId: String? = null
+    private var cattleViewModelRef: CattleViewModel? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { SmartCattleApp() }
+        pendingCattleId = intent?.getStringExtra("cattle_id")
+        setContent { 
+            SmartCattleApp(
+                initialCattleId = pendingCattleId,
+                onViewModelReady = { cattleViewModelRef = it }
+            ) 
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val cid = intent?.getStringExtra("cattle_id")
+        if (cid != null) {
+            pendingCattleId = cid
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        cattleViewModelRef?.isAppInForeground = true
+    }
+
+    override fun onPause() {
+        super.onPause()
+        cattleViewModelRef?.isAppInForeground = false
     }
 }
 
@@ -138,7 +166,34 @@ data class Cattle(
     val stepsToday: Int? = null,
     val stepsLifetime: Int? = null
 )
-data class Alert(val cattle: String, val msg: String, val time: String, val tag: String, val color: Color)
+data class AbnormalAlertEvent(
+    val eventId: String,
+    val cattleId: String,
+    val cattleName: String,
+    val sensorKey: String,
+    val sensorName: String,
+    val currentValue: String,
+    val statusDirection: String, // "HIGH", "LOW", "FALL DETECTED", "ABNORMAL"
+    val expectedRange: String,
+    val timestamp: String,
+    val severity: String, // "CRITICAL", "WARNING"
+    val recommendedAction: String
+)
+
+data class Alert(
+    val cattle: String,
+    val msg: String,
+    val time: String,
+    val tag: String,
+    val color: Color,
+    val id: Int = 0,
+    val cattleId: String = "",
+    val sensorKey: String = "",
+    val currentValue: String = "",
+    val expectedRange: String = "",
+    val status: String = "active", // "active", "read", "resolved"
+    val recommendedAction: String = ""
+)
 
 // Full cow profile (from /api/cows or /api/cows/{id})
 data class CowProfile(
@@ -231,7 +286,20 @@ data class ApiHistoryRow(
     val body_weight_kg: Float? = null,
     val weight_stable: Boolean? = null
 )
-data class ApiAlert(val cattle_id: String, val cattle_name: String, val timestamp: String, val fall_detected: Boolean, val details: List<String>)
+data class ApiAlert(
+    val id: Int? = null,
+    val cattle_id: String,
+    val cattle_name: String,
+    val timestamp: String,
+    val fall_detected: Boolean,
+    val details: List<String>,
+    val sensor_type: String? = null,
+    val value: Float? = null,
+    val threshold: String? = null,
+    val severity: String? = null,
+    val status: String? = null,
+    val recommended_action: String? = null
+)
 
 // CRUD request bodies
 data class CowCreateBody(
@@ -318,7 +386,15 @@ interface ApiService {
     @GET("api/cattle/{id}/history")
     suspend fun getHistory(@Path("id") id: String): List<ApiHistoryRow>
     @GET("api/alerts")
-    suspend fun getAlerts(): List<ApiAlert>
+    suspend fun getAlerts(
+        @Query("status") status: String? = null,
+        @Query("cattle_id") cattleId: String? = null,
+        @Query("limit") limit: Int = 50
+    ): List<ApiAlert>
+    @PUT("api/alerts/{id}/read")
+    suspend fun markAlertRead(@Path("id") id: Int): retrofit2.Response<Unit>
+    @PUT("api/alerts/{id}/resolve")
+    suspend fun markAlertResolved(@Path("id") id: Int): retrofit2.Response<Unit>
     @GET("api/cows")
     suspend fun getCows(): List<ApiCowProfile>
     @GET("api/cows/{id}")
@@ -353,6 +429,63 @@ class CattleViewModel : ViewModel() {
 
     private val _alerts = MutableStateFlow<List<Alert>>(emptyList())
     val alerts: StateFlow<List<Alert>> = _alerts.asStateFlow()
+
+    private val _activeAbnormalAlert = MutableStateFlow<AbnormalAlertEvent?>(null)
+    val activeAbnormalAlert: StateFlow<AbnormalAlertEvent?> = _activeAbnormalAlert.asStateFlow()
+    private val alertQueue = java.util.ArrayDeque<AbnormalAlertEvent>()
+    val sensorStatusMap = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val snoozedCattleUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    var isAppInForeground: Boolean = true
+    var appContext: Context? = null
+
+    fun dismissActiveAlert() {
+        if (alertQueue.isNotEmpty()) {
+            _activeAbnormalAlert.value = alertQueue.removeFirst()
+        } else {
+            _activeAbnormalAlert.value = null
+        }
+    }
+
+    fun snoozeActiveAlert(minutes: Int = 15) {
+        val current = _activeAbnormalAlert.value
+        if (current != null) {
+            val until = System.currentTimeMillis() + (minutes * 60 * 1000L)
+            snoozedCattleUntil[current.cattleId] = until
+        }
+        dismissActiveAlert()
+    }
+
+    fun resolveAlert(alert: Alert) {
+        viewModelScope.launch {
+            try {
+                if (alert.id > 0) {
+                    api?.markAlertResolved(alert.id)
+                }
+                _alerts.value = _alerts.value.map {
+                    if (it.id == alert.id || (it.cattleId.isNotBlank() && it.cattleId == alert.cattleId && it.sensorKey == alert.sensorKey)) {
+                        it.copy(status = "resolved")
+                    } else it
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SmartCattle", "Failed to resolve alert: ${e.message}")
+            }
+        }
+    }
+
+    fun markAlertAsRead(alert: Alert) {
+        viewModelScope.launch {
+            try {
+                if (alert.id > 0) {
+                    api?.markAlertRead(alert.id)
+                }
+                _alerts.value = _alerts.value.map {
+                    if (it.id == alert.id) it.copy(status = "read") else it
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SmartCattle", "Failed to mark alert as read: ${e.message}")
+            }
+        }
+    }
 
     private val _history = MutableStateFlow<List<List<String>>>(emptyList())
     val history: StateFlow<List<List<String>>> = _history.asStateFlow()
@@ -463,6 +596,8 @@ class CattleViewModel : ViewModel() {
     }
 
     fun initLocalCache(context: Context) {
+        appContext = context.applicationContext
+        com.example.smartcattle.util.NotificationHelper.createNotificationChannel(context)
         val db = AppDatabase.getInstance(context)
         cowDao = db.cowDao()
         viewModelScope.launch(Dispatchers.IO) {
@@ -935,10 +1070,24 @@ class CattleViewModel : ViewModel() {
         try {
             val apiAlerts = api?.getAlerts() ?: return
             _alerts.value = apiAlerts.map { a ->
-                val tag = if (a.fall_detected) "FALL" else "WARNING"
-                val color = if (a.fall_detected) Red else Orange
+                val isCrit = a.fall_detected || a.severity?.uppercase(Locale.US) == "CRITICAL"
+                val tag = if (a.fall_detected) "FALL" else if (isCrit) "CRITICAL" else "WARNING"
+                val color = if (isCrit) Red else Orange
                 val msg = a.details.joinToString(" • ").ifEmpty { "Abnormal readings for ${a.cattle_id}" }
-                Alert(a.cattle_name.ifEmpty { a.cattle_id }, msg, formatAlertDateTime(a.timestamp), tag, color)
+                Alert(
+                    cattle = a.cattle_name.ifEmpty { a.cattle_id },
+                    msg = msg,
+                    time = formatAlertDateTime(a.timestamp),
+                    tag = tag,
+                    color = color,
+                    id = a.id ?: 0,
+                    cattleId = a.cattle_id,
+                    sensorKey = a.sensor_type ?: "",
+                    currentValue = a.value?.let { "$it" } ?: "",
+                    expectedRange = a.threshold ?: "",
+                    status = a.status ?: "active",
+                    recommendedAction = a.recommended_action ?: ""
+                )
             }
         } catch (e: Exception) { e.printStackTrace() }
     }
@@ -1046,6 +1195,73 @@ class CattleViewModel : ViewModel() {
 
                         if (eventType == "heartbeat") {
                             webSocket.send("pong")
+                            return@launch
+                        }
+
+                        if (eventType == "alert") {
+                            val alertPayload = envelope.optJSONObject("payload") ?: return@launch
+                            val cid = envelope.optString("cattle_id", alertPayload.optString("cattle_id")).trim().uppercase(Locale.US)
+                            if (cid.isNotBlank() && !deletedCattleIds.contains(cid)) {
+                                val sKey = alertPayload.optString("sensor_key", "general")
+                                val mapKey = "$cid:$sKey"
+                                val prevStatus = sensorStatusMap[mapKey]
+                                if (prevStatus != "abnormal") {
+                                    sensorStatusMap[mapKey] = "abnormal"
+                                    val snoozedUntil = snoozedCattleUntil[cid] ?: 0L
+                                    val isSnoozed = System.currentTimeMillis() < snoozedUntil
+                                    val event = AbnormalAlertEvent(
+                                        eventId = alertPayload.optString("event_id", "EVT-${System.currentTimeMillis()}"),
+                                        cattleId = cid,
+                                        cattleName = alertPayload.optString("cattle_name", cid),
+                                        sensorKey = sKey,
+                                        sensorName = alertPayload.optString("sensor_name", sKey.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }),
+                                        currentValue = alertPayload.optString("current_value"),
+                                        statusDirection = alertPayload.optString("status", "ABNORMAL"),
+                                        expectedRange = alertPayload.optString("expected_range", ""),
+                                        timestamp = formatAlertDateTime(alertPayload.optString("timestamp")),
+                                        severity = alertPayload.optString("severity", "WARNING"),
+                                        recommendedAction = alertPayload.optString("recommended_action", "Inspect animal.")
+                                    )
+                                    val isCrit = event.severity.uppercase(Locale.US) == "CRITICAL" || event.statusDirection == "FALL DETECTED"
+                                    val alertTag = if (event.statusDirection == "FALL DETECTED") "FALL" else if (isCrit) "CRITICAL" else "WARNING"
+                                    val alertColor = if (isCrit) Red else Orange
+                                    val newAlertItem = Alert(
+                                        cattle = event.cattleName,
+                                        msg = "${event.sensorName}: ${event.currentValue} (${event.statusDirection})",
+                                        time = event.timestamp,
+                                        tag = alertTag,
+                                        color = alertColor,
+                                        cattleId = cid,
+                                        sensorKey = event.sensorKey,
+                                        currentValue = event.currentValue,
+                                        expectedRange = event.expectedRange,
+                                        status = "active",
+                                        recommendedAction = event.recommendedAction
+                                    )
+                                    _alerts.value = (listOf(newAlertItem) + _alerts.value).take(50)
+                                    if (!isSnoozed) {
+                                        if (_activeAbnormalAlert.value == null) {
+                                            _activeAbnormalAlert.value = event
+                                        } else {
+                                            alertQueue.add(event)
+                                        }
+                                        appContext?.let { ctx ->
+                                            if (!isAppInForeground) {
+                                                com.example.smartcattle.util.NotificationHelper.showAbnormalNotification(
+                                                    context = ctx,
+                                                    notificationId = cid.hashCode() + sKey.hashCode(),
+                                                    cattleId = cid,
+                                                    cattleName = event.cattleName,
+                                                    sensorName = event.sensorName,
+                                                    currentValue = event.currentValue,
+                                                    expectedRange = event.expectedRange,
+                                                    severity = event.severity
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             return@launch
                         }
 
@@ -1267,19 +1483,136 @@ class CattleViewModel : ViewModel() {
                                 if (overall == "Healthy") "OK" else "WARN")
                             _history.value = (_history.value + listOf(newRow)).takeLast(20)
 
-                            if (overall == "At Risk") {
-                                val alertDetails = buildString {
-                                    if (health.optJSONObject("spo2")?.optString("status") == "abnormal") append("SpO2 abnormal ($spo2Val%) • ")
-                                    if (health.optJSONObject("heart_rate")?.optString("status") == "abnormal") append("Heart Rate abnormal ($hrVal bpm) • ")
-                                    if (health.optJSONObject("temperature")?.optString("status") == "abnormal") append("Temp abnormal ($tempVal°C) • ")
-                                    if (health.optJSONObject("ph")?.optString("status") == "abnormal") append("pH abnormal ($phVal) • ")
-                                    if (fallDetected) append("Fall Detected! ")
-                                }.trimEnd(' ', '•')
-                                val msg = alertDetails.ifEmpty { "Abnormal readings for $cid" }
-                                val tag = if (fallDetected) "FALL" else "WARNING"
-                                val color = if (fallDetected) Red else Orange
-                                val currentAlertTime = SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.getDefault()).format(Date())
-                                _alerts.value = (listOf(Alert(cid, msg, currentAlertTime, tag, color)) + _alerts.value).take(10)
+                            val abnArray = json.optJSONArray("abnormal_events")
+                            if (abnArray != null && abnArray.length() > 0) {
+                                for (i in 0 until abnArray.length()) {
+                                    val evtObj = abnArray.getJSONObject(i)
+                                    val sKey = evtObj.optString("sensor_key")
+                                    val mapKey = "$cid:$sKey"
+                                    val prevStatus = sensorStatusMap[mapKey]
+                                    if (prevStatus != "abnormal") {
+                                        sensorStatusMap[mapKey] = "abnormal"
+                                        val snoozedUntil = snoozedCattleUntil[cid] ?: 0L
+                                        val isSnoozed = System.currentTimeMillis() < snoozedUntil
+                                        val event = AbnormalAlertEvent(
+                                            eventId = evtObj.optString("event_id", "EVT-${System.currentTimeMillis()}"),
+                                            cattleId = cid,
+                                            cattleName = evtObj.optString("cattle_name", profileToSave.name),
+                                            sensorKey = sKey,
+                                            sensorName = evtObj.optString("sensor_name", sKey.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }),
+                                            currentValue = evtObj.optString("current_value"),
+                                            statusDirection = evtObj.optString("status", "ABNORMAL"),
+                                            expectedRange = evtObj.optString("expected_range", ""),
+                                            timestamp = formatAlertDateTime(evtObj.optString("timestamp")),
+                                            severity = evtObj.optString("severity", "WARNING"),
+                                            recommendedAction = evtObj.optString("recommended_action", "Inspect animal.")
+                                        )
+                                        val isCrit = event.severity.uppercase(Locale.US) == "CRITICAL" || event.statusDirection == "FALL DETECTED"
+                                        val alertTag = if (event.statusDirection == "FALL DETECTED") "FALL" else if (isCrit) "CRITICAL" else "WARNING"
+                                        val alertColor = if (isCrit) Red else Orange
+                                        val newAlertItem = Alert(
+                                            cattle = event.cattleName,
+                                            msg = "${event.sensorName}: ${event.currentValue} (${event.statusDirection})",
+                                            time = event.timestamp,
+                                            tag = alertTag,
+                                            color = alertColor,
+                                            cattleId = cid,
+                                            sensorKey = event.sensorKey,
+                                            currentValue = event.currentValue,
+                                            expectedRange = event.expectedRange,
+                                            status = "active",
+                                            recommendedAction = event.recommendedAction
+                                        )
+                                        _alerts.value = (listOf(newAlertItem) + _alerts.value).take(50)
+                                        if (!isSnoozed) {
+                                            if (_activeAbnormalAlert.value == null) {
+                                                _activeAbnormalAlert.value = event
+                                            } else {
+                                                alertQueue.add(event)
+                                            }
+                                            appContext?.let { ctx ->
+                                                if (!isAppInForeground) {
+                                                    com.example.smartcattle.util.NotificationHelper.showAbnormalNotification(
+                                                        context = ctx,
+                                                        notificationId = cid.hashCode() + sKey.hashCode(),
+                                                        cattleId = cid,
+                                                        cattleName = event.cattleName,
+                                                        sensorName = event.sensorName,
+                                                        currentValue = event.currentValue,
+                                                        expectedRange = event.expectedRange,
+                                                        severity = event.severity
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if (overall == "At Risk") {
+                                // Fallback for servers without abnormal_events array
+                                val alertSensors = mutableListOf<Triple<String, String, String>>()
+                                if (health.optJSONObject("spo2")?.optString("status") == "abnormal") alertSensors.add(Triple("spo2", "SpO2", "$spo2Val%"))
+                                if (health.optJSONObject("heart_rate")?.optString("status") == "abnormal") alertSensors.add(Triple("heart_rate", "Heart Rate", "$hrVal bpm"))
+                                if (health.optJSONObject("temperature")?.optString("status") == "abnormal") alertSensors.add(Triple("temperature", "Body Temp", "$tempVal°C"))
+                                if (health.optJSONObject("ph")?.optString("status") == "abnormal") alertSensors.add(Triple("ph", "pH Level", phVal))
+                                if (fallDetected) alertSensors.add(Triple("mems", "Activity / Posture", "Fall Detected"))
+
+                                for ((sKey, sName, sVal) in alertSensors) {
+                                    val mapKey = "$cid:$sKey"
+                                    if (sensorStatusMap[mapKey] != "abnormal") {
+                                        sensorStatusMap[mapKey] = "abnormal"
+                                        val isCrit = fallDetected || sKey == "temperature" && tempVal.toFloatOrNull()?.let { it > 40.5f } == true
+                                        val currentAlertTime = SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.getDefault()).format(Date())
+                                        val event = AbnormalAlertEvent(
+                                            eventId = "EVT-$cid-$sKey-${System.currentTimeMillis()}",
+                                            cattleId = cid,
+                                            cattleName = profileToSave.name,
+                                            sensorKey = sKey,
+                                            sensorName = sName,
+                                            currentValue = sVal,
+                                            statusDirection = if (sKey == "mems") "FALL DETECTED" else "ABNORMAL",
+                                            expectedRange = when (sKey) {
+                                                "spo2" -> "95% - 100%"
+                                                "heart_rate" -> "48 - 84 BPM"
+                                                "temperature" -> "38.0°C - 39.3°C"
+                                                "ph" -> "6.2 - 7.2 pH"
+                                                else -> "Normal bounds"
+                                            },
+                                            timestamp = currentAlertTime,
+                                            severity = if (isCrit) "CRITICAL" else "WARNING",
+                                            recommendedAction = "Inspect animal and provide veterinary care."
+                                        )
+                                        val alertTag = if (event.statusDirection == "FALL DETECTED") "FALL" else if (isCrit) "CRITICAL" else "WARNING"
+                                        val alertColor = if (isCrit) Red else Orange
+                                        val newAlertItem = Alert(
+                                            cattle = event.cattleName,
+                                            msg = "${event.sensorName}: ${event.currentValue}",
+                                            time = event.timestamp,
+                                            tag = alertTag,
+                                            color = alertColor,
+                                            cattleId = cid,
+                                            sensorKey = event.sensorKey,
+                                            currentValue = event.currentValue,
+                                            expectedRange = event.expectedRange,
+                                            status = "active",
+                                            recommendedAction = event.recommendedAction
+                                        )
+                                        _alerts.value = (listOf(newAlertItem) + _alerts.value).take(50)
+                                        if (_activeAbnormalAlert.value == null) {
+                                            _activeAbnormalAlert.value = event
+                                        } else {
+                                            alertQueue.add(event)
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Sensor recovery tracking: clear abnormal status when normal
+                            listOf("spo2", "heart_rate", "temperature", "ph", "mems").forEach { k ->
+                                val pStatus = health.optJSONObject(k)?.optString("status", "normal") ?: "normal"
+                                val mapKey = "$cid:$k"
+                                if (pStatus == "normal" && !fallDetected && sensorStatusMap[mapKey] == "abnormal") {
+                                    sensorStatusMap[mapKey] = "normal"
+                                }
                             }
                         }
                     } catch (e: Exception) {
@@ -1355,7 +1688,10 @@ private fun ApiCowProfile.toCowProfile(photoPath: String? = null) = CowProfile(
 // ══════════════ ROOT APP ══════════════
 
 @Composable
-fun SmartCattleApp() {
+fun SmartCattleApp(
+    initialCattleId: String? = null,
+    onViewModelReady: (CattleViewModel) -> Unit = {}
+) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("smart_cattle_prefs", Context.MODE_PRIVATE) }
 
@@ -1373,11 +1709,28 @@ fun SmartCattleApp() {
     val viewModel: CattleViewModel = viewModel()
 
     LaunchedEffect(Unit) {
+        onViewModelReady(viewModel)
         viewModel.initLocalCache(context)
     }
 
     LaunchedEffect(ipAddress, port) {
         viewModel.configureIp(ipAddress, port)
+    }
+
+    // Android 13+ Notification Permission
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val launcher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.RequestPermission()
+        ) { _ -> }
+        LaunchedEffect(Unit) {
+            if (androidx.core.content.ContextCompat.checkSelfPermission(
+                    context,
+                    android.Manifest.permission.POST_NOTIFICATIONS
+                ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                launcher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
     }
 
     SmartCattleTheme(
@@ -1389,6 +1742,7 @@ fun SmartCattleApp() {
         } else {
             MainScreen(
                 viewModel = viewModel,
+                initialCattleId = initialCattleId,
                 currentThemeMode = currentThemeMode,
                 onToggleTheme = {
                     val nextMode = when (currentThemeMode) {
@@ -1578,6 +1932,7 @@ fun FeaturePill(text: String) {
 @Composable
 fun MainScreen(
     viewModel: CattleViewModel,
+    initialCattleId: String? = null,
     currentThemeMode: ThemeMode,
     onToggleTheme: () -> Unit,
     onOpenSettings: () -> Unit
@@ -1587,16 +1942,32 @@ fun MainScreen(
     val isConnected by viewModel.isConnected.collectAsState()
     val alerts by viewModel.alerts.collectAsState()
     val cowProfiles by viewModel.cowProfiles.collectAsState()
-    var selectedCowId by remember { mutableStateOf<String?>(null) }
+    val activeAbnormalAlert by viewModel.activeAbnormalAlert.collectAsState()
+    var selectedCowId by remember { mutableStateOf<String?>(initialCattleId) }
     val context = LocalContext.current
     val selectedCow = remember(selectedCowId, cowProfiles) {
         cowProfiles.find { it.cattleId == selectedCowId }?.let { cow ->
             cow.copy(photoPath = viewModel.getPhotoPath(cow.cattleId, context))
+        } ?: selectedCowId?.let { cid ->
+            CowProfile(cattleId = cid, name = cid, breed = "Not Available", age = "Not Available")
         }
     }
 
     val snackbarHostState = remember { SnackbarHostState() }
     var viewingWeightForCowId by remember { mutableStateOf<String?>(null) }
+
+    if (activeAbnormalAlert != null) {
+        AbnormalConditionDialog(
+            alert = activeAbnormalAlert!!,
+            onDismiss = { viewModel.dismissActiveAlert() },
+            onSnooze = { viewModel.snoozeActiveAlert(minutes = 15) },
+            onViewCow = { cowId ->
+                viewModel.dismissActiveAlert()
+                viewingWeightForCowId = null
+                selectedCowId = cowId
+            }
+        )
+    }
 
     if (viewingWeightForCowId != null) {
         WeightMonitoringScreen(
@@ -1757,7 +2128,7 @@ fun MainScreen(
                     onOpenSettings = onOpenSettings,
                     onOpenWeight = { viewingWeightForCowId = it }
                 )
-                1 -> AlertsTab(viewModel = viewModel)
+                1 -> AlertsTab(viewModel = viewModel, onViewCow = { selectedCowId = it })
                 2 -> HistoryTab(viewModel = viewModel)
                 3 -> CowsTab(viewModel = viewModel, onViewProfile = { selectedCowId = it.cattleId })
             }
@@ -2375,12 +2746,254 @@ private fun MemsAxisColumn(label: String, value: Float?, isValid: Boolean) {
     }
 }
 
-// ══════════════ ALERTS TAB ══════════════
+// ══════════════ ABNORMAL NOTIFICATION POPUP ══════════════
 
 @Composable
-fun AlertsTab(viewModel: CattleViewModel) {
+fun AbnormalConditionDialog(
+    alert: AbnormalAlertEvent,
+    onDismiss: () -> Unit,
+    onSnooze: () -> Unit,
+    onViewCow: (String) -> Unit
+) {
+    val spacing = MaterialTheme.spacing
+    val isCritical = alert.severity.uppercase(Locale.US) == "CRITICAL" || alert.statusDirection == "FALL DETECTED"
+    val accentColor = if (isCritical) MaterialTheme.colorScheme.error else Orange
+    val containerBg = MaterialTheme.colorScheme.surface
+
+    Dialog(
+        onDismissRequest = onDismiss
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(spacing.sm),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = containerBg),
+            border = androidx.compose.foundation.BorderStroke(2.dp, accentColor)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(spacing.lg),
+                verticalArrangement = Arrangement.spacedBy(spacing.md)
+            ) {
+                // Header with warning icon & severity chip
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(spacing.sm)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(accentColor.copy(alpha = 0.15f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (isCritical) Icons.Default.Warning else Icons.Default.ErrorOutline,
+                                contentDescription = "Abnormal Warning",
+                                tint = accentColor,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        Column {
+                            Text(
+                                text = "ABNORMAL CONDITION",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = accentColor
+                            )
+                            Text(
+                                text = "Real-Time Telemetry Alert",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Surface(
+                        color = accentColor.copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(8.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, accentColor)
+                    ) {
+                        Text(
+                            text = if (isCritical) "CRITICAL" else "WARNING",
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = accentColor
+                        )
+                    }
+                }
+
+                Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                // Detail Information Table
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                        .padding(spacing.md),
+                    verticalArrangement = Arrangement.spacedBy(spacing.sm)
+                ) {
+                    AbnormalInfoRow(label = "Cow", value = "${alert.cattleName} (${alert.cattleId})")
+                    AbnormalInfoRow(label = "Sensor", value = alert.sensorName)
+                    AbnormalInfoRow(
+                        label = "Current Value",
+                        value = alert.currentValue,
+                        valueColor = accentColor,
+                        valueBold = true
+                    )
+                    AbnormalInfoRow(label = "Status", value = alert.statusDirection, valueColor = accentColor)
+                    if (alert.expectedRange.isNotBlank()) {
+                        AbnormalInfoRow(label = "Expected Range", value = alert.expectedRange)
+                    }
+                    AbnormalInfoRow(label = "Time", value = alert.timestamp)
+                }
+
+                // Recommended Action Box
+                if (alert.recommendedAction.isNotBlank()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(accentColor.copy(alpha = 0.08f))
+                            .border(1.dp, accentColor.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                            .padding(spacing.md),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MedicalServices,
+                                contentDescription = "Veterinary Action",
+                                tint = accentColor,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = "RECOMMENDED ACTION",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = accentColor
+                            )
+                        }
+                        Text(
+                            text = alert.recommendedAction,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+
+                // Action Buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(spacing.sm),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = onSnooze,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(vertical = 10.dp)
+                    ) {
+                        Text("Snooze", style = MaterialTheme.typography.labelMedium)
+                    }
+
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(vertical = 10.dp)
+                    ) {
+                        Text("Dismiss", style = MaterialTheme.typography.labelMedium)
+                    }
+
+                    Button(
+                        onClick = { onViewCow(alert.cattleId) },
+                        modifier = Modifier.weight(1.3f),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = accentColor),
+                        contentPadding = PaddingValues(vertical = 10.dp)
+                    ) {
+                        Text(
+                            "View Cow",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.surface
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AbnormalInfoRow(
+    label: String,
+    value: String,
+    valueColor: Color = MaterialTheme.colorScheme.onSurface,
+    valueBold: Boolean = false
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = if (valueBold) FontWeight.Bold else FontWeight.Medium,
+            color = valueColor
+        )
+    }
+}
+
+// ══════════════ ALERTS TAB ══════════════
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AlertsTab(
+    viewModel: CattleViewModel,
+    onViewCow: (String) -> Unit = {}
+) {
     val spacing = MaterialTheme.spacing
     val alerts by viewModel.alerts.collectAsState()
+
+    var severityFilter by remember { mutableStateOf("ALL") } // ALL, CRITICAL, WARNING
+    var statusFilter by remember { mutableStateOf("ALL") } // ALL, ACTIVE, RESOLVED
+
+    val filteredAlerts = remember(alerts, severityFilter, statusFilter) {
+        alerts.filter { alert ->
+            val matchesSeverity = when (severityFilter) {
+                "CRITICAL" -> alert.tag.uppercase(Locale.US) in listOf("CRITICAL", "FALL")
+                "WARNING" -> alert.tag.uppercase(Locale.US) !in listOf("CRITICAL", "FALL")
+                else -> true
+            }
+            val matchesStatus = when (statusFilter) {
+                "ACTIVE" -> alert.status.lowercase(Locale.US) == "active"
+                "RESOLVED" -> alert.status.lowercase(Locale.US) == "resolved"
+                else -> true
+            }
+            matchesSeverity && matchesStatus
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -2395,24 +3008,68 @@ fun AlertsTab(viewModel: CattleViewModel) {
             icon = Icons.Default.NotificationsActive
         )
 
-        if (alerts.isEmpty()) {
+        // Filter chips bar
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(spacing.xs)
+        ) {
+            Text(
+                text = "Filters",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(spacing.xs),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                listOf("ALL", "CRITICAL", "WARNING").forEach { sev ->
+                    FilterChip(
+                        selected = severityFilter == sev,
+                        onClick = { severityFilter = sev },
+                        label = { Text(sev.replaceFirstChar { it.titlecase(Locale.US) }) }
+                    )
+                }
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                listOf("ALL", "ACTIVE", "RESOLVED").forEach { st ->
+                    FilterChip(
+                        selected = statusFilter == st,
+                        onClick = { statusFilter = st },
+                        label = { Text(st.replaceFirstChar { it.titlecase(Locale.US) }) }
+                    )
+                }
+            }
+        }
+
+        if (filteredAlerts.isEmpty()) {
             EmptyStateView(
                 title = stringResource(R.string.empty_alerts_title),
                 message = stringResource(R.string.empty_alerts_desc),
                 icon = Icons.Default.CheckCircle
             )
         } else {
-            alerts.forEach { alert ->
-                AlertCard(alert = alert)
+            filteredAlerts.forEach { alert ->
+                AlertCard(
+                    alert = alert,
+                    onResolve = { viewModel.resolveAlert(alert) },
+                    onViewCow = { if (alert.cattleId.isNotBlank()) onViewCow(alert.cattleId) }
+                )
             }
         }
     }
 }
 
 @Composable
-fun AlertCard(alert: Alert) {
+fun AlertCard(
+    alert: Alert,
+    onResolve: () -> Unit = {},
+    onViewCow: () -> Unit = {}
+) {
     val spacing = MaterialTheme.spacing
-    val isCritical = alert.tag.uppercase() in listOf("CRITICAL", "FALL")
+    val isCritical = alert.tag.uppercase(Locale.US) in listOf("CRITICAL", "FALL")
+    val isResolved = alert.status.lowercase(Locale.US) == "resolved"
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -2434,7 +3091,7 @@ fun AlertCard(alert: Alert) {
                     .width(4.dp)
                     .fillMaxHeight()
                     .clip(CircleShape)
-                    .background(alert.color)
+                    .background(if (isResolved) Green else alert.color)
             )
 
             Column(
@@ -2446,17 +3103,48 @@ fun AlertCard(alert: Alert) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text(
-                        text = alert.cattle,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = alert.cattle,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        if (alert.cattleId.isNotBlank() && alert.cattleId != alert.cattle) {
+                            Text(
+                                text = "(${alert.cattleId})",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
 
-                    HealthStatusChip(
-                        status = alert.tag,
-                        statusType = if (isCritical) HealthStatusType.CRITICAL else HealthStatusType.WARNING
-                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (isResolved) {
+                            Surface(
+                                color = Green.copy(alpha = 0.15f),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = "RESOLVED",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Green
+                                )
+                            }
+                        }
+                        HealthStatusChip(
+                            status = alert.tag,
+                            statusType = if (isCritical) HealthStatusType.CRITICAL else HealthStatusType.WARNING
+                        )
+                    }
                 }
 
                 Text(
@@ -2465,21 +3153,75 @@ fun AlertCard(alert: Alert) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.AccessTime,
-                        contentDescription = "Alert Time",
-                        modifier = Modifier.size(12.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                    )
+                if (alert.expectedRange.isNotBlank()) {
                     Text(
-                        text = alert.time,
+                        text = "Normal Expected Range: ${alert.expectedRange}",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
                     )
+                }
+
+                if (alert.recommendedAction.isNotBlank()) {
+                    Surface(
+                        color = alert.color.copy(alpha = 0.08f),
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "Recommendation: ${alert.recommendedAction}",
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AccessTime,
+                            contentDescription = "Alert Time",
+                            modifier = Modifier.size(12.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                        Text(
+                            text = alert.time,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(spacing.xs),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (!isResolved) {
+                            OutlinedButton(
+                                onClick = onResolve,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text("Resolve", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+
+                        if (alert.cattleId.isNotBlank()) {
+                            Button(
+                                onClick = onViewCow,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text("View Cow", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
                 }
             }
         }

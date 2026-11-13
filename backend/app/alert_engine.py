@@ -131,10 +131,15 @@ class AlertService:
 
             if alert_payload["severity"] == AlertSeverity.CRITICAL and websocket_manager:
                 try:
-                    await websocket_manager.broadcast({
-                        "type": "critical_alert",
-                        "alert": alert_payload
-                    })
+                    if hasattr(websocket_manager, "format_event"):
+                        evt = websocket_manager.format_event(
+                            event_type="alert",
+                            payload={"type": "critical_alert", "alert": alert_payload},
+                            cattle_id=cattle_id
+                        )
+                        await websocket_manager.broadcast(evt)
+                    else:
+                        await websocket_manager.broadcast(alert_payload)
                 except Exception as e:
                     print(f"Broadcast failed: {e}")
                 
